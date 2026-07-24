@@ -1,21 +1,16 @@
 /**
- * Nights Watch Backend — Phase 0 scaffold.
- * Fastify server only; feature modules land in later phases.
+ * Nights Watch Backend — Phase 1: Plan + Executor wiring.
  */
 import Fastify from "fastify";
 import { config } from "./config/index.js";
 import { initOtel, shutdownOtel } from "./otel/index.js";
+import { registerRoutes } from "./api/routes.js";
 
 async function main(): Promise<void> {
   initOtel();
 
   const app = Fastify({ logger: true });
-
-  app.get("/health", async () => ({
-    ok: true,
-    service: "nights-watch",
-    phase: 0,
-  }));
+  await registerRoutes(app);
 
   const shutdown = async () => {
     await app.close();
@@ -26,7 +21,7 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void shutdown());
 
   await app.listen({ port: config.port, host: "0.0.0.0" });
-  console.log(`[backend] listening on :${config.port}`);
+  console.log(`[backend] phase=1 listening on :${config.port}`);
 }
 
 main().catch((err) => {

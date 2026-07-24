@@ -11,9 +11,12 @@ import {
   ATTR_SERVICE_VERSION,
 } from "@opentelemetry/semantic-conventions";
 import {
+  context,
   trace,
   SpanStatusCode,
+  ROOT_CONTEXT,
   type Span,
+  type SpanContext,
   type Tracer,
 } from "@opentelemetry/api";
 import { config } from "../config/index.js";
@@ -76,12 +79,57 @@ export function getTracer(name = "nights-watch"): Tracer {
 /** Canonical span names used across the project (Section 8 / OTel helpers). */
 export const SpanNames = {
   TEST: "nights-watch.test",
+  RUN_EXECUTE: "run.execute",
+  PLAN_GENERATED: "plan.generated",
+  EXECUTOR_STEP: "executor.step",
   CHECKPOINT_CREATED: "checkpoint.created",
   POLICY_EVALUATION: "policy.evaluation",
   POLICY_EXPLANATION: "policy.explanation",
   CHECKPOINT_RESTORED: "checkpoint.restored",
   RECOVERY_OUTCOME: "recovery.outcome",
 } as const;
+
+/** Start a long-lived parent span (e.g. a full run). Caller must end it. */
+export function startParentSpan(
+  name: string,
+  attributes: Record<string, string | number | boolean> = {},
+): Span {
+  const span = getTracer().startSpan(name);
+  for (const [key, value] of Object.entries(attributes)) {
+    span.setAttribute(key, value);
+  }
+  return span;
+}
+
+/** Run work as a child of a stored parent SpanContext (e.g. async webhook). */
+export async function withChildSpan<T>(
+  parent: SpanContext,
+  name: string,
+  attributes: Record<string, string | number | boolean>,
+  fn: (span: Span) => Promise<T> | T,
+): Promise<T> {
+  const ctx = trace.setSpanContext(ROOT_CONTEXT, parent);
+  const tracer = getTracer();
+  return context.with(ctx, () =>
+    tracer.startActiveSpan(name, async (span) => {
+      try {
+        for (const [key, value] of Object.entries(attributes)) {
+          span.setAttribute(key, value);
+        }
+        const result = await fn(span);
+        span.setStatus({ code: SpanStatusCode.OK });
+        return result;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        span.setStatus({ code: SpanStatusCode.ERROR, message });
+        span.recordException(err instanceof Error ? err : new Error(message));
+        throw err;
+      } finally {
+        span.end();
+      }
+    }),
+  );
+}
 
 export async function withSpan<T>(
   name: string,

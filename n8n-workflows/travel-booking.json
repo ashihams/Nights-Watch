@@ -1,0 +1,175 @@
+{
+  "name": "travel-booking",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "travel-booking",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-start",
+      "name": "Webhook Start",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "nights-watch-travel-booking"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/mocks/search",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"origin\": \"{{$json.plan.origin}}\",\n  \"destination\": \"{{$json.plan.destination}}\",\n  \"maxPrice\": {{$json.plan.maxBudget}}\n}",
+        "options": {}
+      },
+      "id": "search-flights",
+      "name": "Search Flights",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/webhooks/n8n/step",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"runId\": \"{{$('Webhook Start').item.json.runId}}\",\n  \"stepId\": \"search\",\n  \"tool\": \"search_flights\",\n  \"status\": \"success\",\n  \"result\": {{JSON.stringify($json)}},\n  \"costUsd\": 0\n}",
+        "options": {}
+      },
+      "id": "report-search",
+      "name": "Report Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/mocks/select",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"flightId\": \"{{$('Search Flights').item.json.options[0].id}}\"\n}",
+        "options": {}
+      },
+      "id": "select-flight",
+      "name": "Select Flight",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/webhooks/n8n/step",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"runId\": \"{{$('Webhook Start').item.json.runId}}\",\n  \"stepId\": \"select\",\n  \"tool\": \"select_flight\",\n  \"status\": \"success\",\n  \"result\": {{JSON.stringify($json)}},\n  \"costUsd\": {{$json.selected.priceUsd}}\n}",
+        "options": {}
+      },
+      "id": "report-select",
+      "name": "Report Select",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/mocks/confirm",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"flightId\": \"{{$('Select Flight').item.json.selected.id}}\",\n  \"passengerName\": \"Demo Traveler\"\n}",
+        "options": {}
+      },
+      "id": "confirm-details",
+      "name": "Confirm Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/webhooks/n8n/step",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"runId\": \"{{$('Webhook Start').item.json.runId}}\",\n  \"stepId\": \"confirm\",\n  \"tool\": \"confirm_details\",\n  \"status\": \"success\",\n  \"result\": {{JSON.stringify($json)}},\n  \"costUsd\": 0\n}",
+        "options": {}
+      },
+      "id": "report-confirm",
+      "name": "Report Confirm",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/mocks/book",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"flightId\": \"{{$('Select Flight').item.json.selected.id}}\",\n  \"passengerName\": \"Demo Traveler\"\n}",
+        "options": {}
+      },
+      "id": "book-flight",
+      "name": "Book Flight",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/webhooks/n8n/step",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"runId\": \"{{$('Webhook Start').item.json.runId}}\",\n  \"stepId\": \"book\",\n  \"tool\": \"book_flight\",\n  \"status\": \"success\",\n  \"result\": {{JSON.stringify($json)}},\n  \"costUsd\": {{$json.booking.priceUsd}}\n}",
+        "options": {}
+      },
+      "id": "report-book",
+      "name": "Report Book",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, 0]
+    }
+  ],
+  "connections": {
+    "Webhook Start": {
+      "main": [[{ "node": "Search Flights", "type": "main", "index": 0 }]]
+    },
+    "Search Flights": {
+      "main": [[{ "node": "Report Search", "type": "main", "index": 0 }]]
+    },
+    "Report Search": {
+      "main": [[{ "node": "Select Flight", "type": "main", "index": 0 }]]
+    },
+    "Select Flight": {
+      "main": [[{ "node": "Report Select", "type": "main", "index": 0 }]]
+    },
+    "Report Select": {
+      "main": [[{ "node": "Confirm Details", "type": "main", "index": 0 }]]
+    },
+    "Confirm Details": {
+      "main": [[{ "node": "Report Confirm", "type": "main", "index": 0 }]]
+    },
+    "Report Confirm": {
+      "main": [[{ "node": "Book Flight", "type": "main", "index": 0 }]]
+    },
+    "Book Flight": {
+      "main": [[{ "node": "Report Book", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "nightsWatch": {
+      "phase": 1,
+      "notes": "Import into n8n. POST { runId, plan } to the webhook after Backend /runs/start. Set NIGHTS_WATCH_BACKEND env or edit URLs."
+    }
+  }
+}
