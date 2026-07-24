@@ -1,6 +1,6 @@
 /**
  * Supervisor — owns live execution state for a run.
- * Phase 1: receives n8n step reports, correlates them under one OTel trace.
+ * Phase 2: also writes local checkpoints + correlated checkpoint.created spans.
  * Does not call SigNoz Query API or MCP (policy / explanation come later).
  */
 import { randomUUID } from "node:crypto";
@@ -15,6 +15,8 @@ import {
   withChildSpan,
 } from "../otel/index.js";
 import { generatePlan } from "../planner/index.js";
+import { createCheckpoint } from "../checkpoints/index.js";
+import { CheckpointMilestones } from "../types/checkpoint.js";
 import type { Plan } from "../types/plan.js";
 import type { StepReport } from "../types/step-report.js";
 
@@ -27,6 +29,10 @@ export interface ActiveRun {
   planSource: "llm" | "deterministic_fallback";
   status: RunStatus;
   completedSteps: string[];
+  /** Accumulated artifacts for checkpoint.state / resume. */
+  artifacts: Record<string, unknown>;
+  budgetConsumed: number;
+  checkpointIds: string[];
   parentSpan: Span;
   parentSpanContext: SpanContext;
   startedAt: string;
@@ -39,10 +45,7 @@ export function getRun(runId: string): ActiveRun | undefined {
 }
 
 export function listRuns(): ActiveRun[] {
-  return [...runs.values()].map((r) => ({
-    ...r,
-    // Don't serialize span objects in API responses later — use summary helper.
-  }));
+  return [...runs.values()];
 }
 
 export function summarizeRun(run: ActiveRun) {
@@ -53,11 +56,40 @@ export function summarizeRun(run: ActiveRun) {
     planSource: run.planSource,
     plan: run.plan,
     completedSteps: run.completedSteps,
+    budgetConsumed: run.budgetConsumed,
+    checkpointIds: run.checkpointIds,
     startedAt: run.startedAt,
   };
 }
 
-/** Start a run: generate plan, open parent span, return run summary. */
+async function emitMilestoneCheckpoint(
+  run: ActiveRun,
+  milestone: (typeof CheckpointMilestones)[number],
+): Promise<void> {
+  const cp = await createCheckpoint({
+    runId: run.runId,
+    index: milestone.index,
+    label: milestone.label,
+    planStep: milestone.planStep,
+    state: {
+      task: run.task,
+      plan: run.plan,
+      planSource: run.planSource,
+      completedSteps: [...run.completedSteps],
+      artifacts: { ...run.artifacts },
+      status: run.status,
+    },
+    budgetConsumed: run.budgetConsumed,
+    trustContext: {
+      sources: ["planner", "executor", "local-store"],
+      planSource: run.planSource,
+    },
+    parentSpanContext: run.parentSpanContext,
+  });
+  run.checkpointIds.push(cp.id);
+}
+
+/** Start a run: generate plan, open parent span, checkpoint plan_generated. */
 export async function startRun(task: string): Promise<ReturnType<typeof summarizeRun>> {
   const runId = `run-${randomUUID().slice(0, 8)}`;
   const { plan, source } = await generatePlan(task);
@@ -80,11 +112,17 @@ export async function startRun(task: string): Promise<ReturnType<typeof summariz
     planSource: source,
     status: "running",
     completedSteps: [],
+    artifacts: {},
+    budgetConsumed: 0,
+    checkpointIds: [],
     parentSpan,
     parentSpanContext: parentSpan.spanContext(),
     startedAt: new Date().toISOString(),
   };
   runs.set(runId, active);
+
+  const planMilestone = CheckpointMilestones[0];
+  await emitMilestoneCheckpoint(active, planMilestone);
 
   console.log(`[supervisor] started ${runId} planSource=${source} steps=${plan.steps.length}`);
   console.log(`[supervisor] plan:\n${JSON.stringify(plan, null, 2)}`);
@@ -127,9 +165,21 @@ export async function recordStepReport(
   );
 
   run.completedSteps.push(report.stepId);
+  run.artifacts[report.stepId] = report.result;
+  run.budgetConsumed += report.costUsd;
+
   console.log(
     `[supervisor] step ${report.stepId} tool=${report.tool} status=${report.status} run=${report.runId}`,
   );
+
+  if (report.status === "success") {
+    const milestone = CheckpointMilestones.find(
+      (m) => m.afterStepId === report.stepId,
+    );
+    if (milestone) {
+      await emitMilestoneCheckpoint(run, milestone);
+    }
+  }
 
   const expected = [...run.plan.steps].sort((a, b) => a.order - b.order);
   const allDone = expected.every((s) => run.completedSteps.includes(s.id));
@@ -145,9 +195,12 @@ export async function recordStepReport(
     run.parentSpan.setStatus({ code: SpanStatusCode.OK });
     run.parentSpan.addEvent("run.completed", {
       steps: run.completedSteps.join(","),
+      checkpoints: run.checkpointIds.join(","),
     });
     run.parentSpan.end();
-    console.log(`[supervisor] run ${report.runId} completed`);
+    console.log(
+      `[supervisor] run ${report.runId} completed checkpoints=${run.checkpointIds.length}`,
+    );
   }
 
   return summarizeRun(run);

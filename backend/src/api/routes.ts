@@ -7,6 +7,7 @@ import {
   summarizeRun,
   listRuns,
 } from "../supervisor/index.js";
+import { listCheckpointsForRun } from "../checkpoints/index.js";
 import { parseStepReport } from "../types/step-report.js";
 import {
   searchFlights,
@@ -26,7 +27,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({
     ok: true,
     service: "nights-watch",
-    phase: 1,
+    phase: 2,
   }));
 
   app.get("/runs", async () => ({
@@ -38,6 +39,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!run) return reply.code(404).send({ error: "run not found" });
     return summarizeRun(run);
   });
+
+  /** Local SQLite checkpoints for a run (source of truth for rollback). */
+  app.get<{ Params: { runId: string } }>(
+    "/runs/:runId/checkpoints",
+    async (req, reply) => {
+      const checkpoints = listCheckpointsForRun(req.params.runId);
+      if (checkpoints.length === 0) {
+        const run = getRun(req.params.runId);
+        if (!run) return reply.code(404).send({ error: "run not found" });
+      }
+      return { runId: req.params.runId, checkpoints };
+    },
+  );
 
   /** Create plan + open run trace. Executor (n8n or happy-path harness) drives steps. */
   app.post("/runs/start", async (req, reply) => {

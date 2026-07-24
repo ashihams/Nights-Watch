@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "otel:test": "tsx src/otel/send-test-span.ts",
     "happy-path": "tsx src/executor/happy-path.ts",
+    "checkpoints:list": "tsx src/checkpoints/inspect.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

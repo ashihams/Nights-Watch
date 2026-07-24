@@ -128,7 +128,8 @@ async function main(): Promise<void> {
 
   console.log(`[happy-path] booked ${bookRes.booking.bookingId} for $${bookRes.booking.priceUsd}`);
   console.log(`[happy-path] done — check SigNoz Traces for run.id=${run.runId}`);
-  console.log(`[happy-path] look for parent span run.execute with 4 executor.step children`);
+  console.log(`[happy-path] expect 4 checkpoint.created spans + 4 executor.step children`);
+  console.log(`[happy-path] inspect local store: npm run checkpoints:list -- ${run.runId}`);
 
   await new Promise((r) => setTimeout(r, 2000));
   await shutdownOtel();

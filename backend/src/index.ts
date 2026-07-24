@@ -1,5 +1,5 @@
 /**
- * Nights Watch Backend — Phase 1: Plan + Executor wiring.
+ * Nights Watch Backend — Phase 2: Checkpoint Manager + Phase 1 wiring.
  */
 import Fastify from "fastify";
 import { config } from "./config/index.js";
@@ -21,7 +21,7 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void shutdown());
 
   await app.listen({ port: config.port, host: "0.0.0.0" });
-  console.log(`[backend] phase=1 listening on :${config.port}`);
+  console.log(`[backend] phase=2 listening on :${config.port}`);
 }
 
 main().catch((err) => {
