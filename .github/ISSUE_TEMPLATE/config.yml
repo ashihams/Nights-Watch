@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: SigNoz docs
+    url: https://signoz.io/docs/
+    about: Instrumentation, Query API, and self-host / Cloud guides
