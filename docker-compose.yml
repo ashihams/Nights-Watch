@@ -1,0 +1,94 @@
+# Nights Watch — backend + dashboard only.
+# SigNoz runs as its own stack (infra/signoz/); reach it via host.docker.internal.
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: ${PORT:-3001}
+      NODE_ENV: ${NODE_ENV:-production}
+      CHECKPOINT_DB_PATH: ${CHECKPOINT_DB_PATH:-./data/checkpoints.sqlite}
+
+      # OTel → SigNoz (outside compose)
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-nights-watch}
+
+      # SigNoz Query API + MCP
+      SIGNOZ_QUERY_API_URL: ${SIGNOZ_QUERY_API_URL:-http://host.docker.internal:8080}
+      SIGNOZ_API_KEY: ${SIGNOZ_API_KEY:-}
+      SIGNOZ_MCP_ENDPOINT: ${SIGNOZ_MCP_ENDPOINT:-http://host.docker.internal:8000}
+      SIGNOZ_MCP_TOKEN: ${SIGNOZ_MCP_TOKEN:-}
+
+      # n8n Executor (host or optional compose service below)
+      N8N_WEBHOOK_BASE_URL: ${N8N_WEBHOOK_BASE_URL:-http://host.docker.internal:5678}
+      N8N_API_KEY: ${N8N_API_KEY:-}
+
+      # LLM
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-20250514}
+
+      # Policy thresholds
+      PAUSE_THRESHOLD: ${PAUSE_THRESHOLD:-40}
+      ROLLBACK_THRESHOLD: ${ROLLBACK_THRESHOLD:-70}
+      HARD_STOP_THRESHOLD: ${HARD_STOP_THRESHOLD:-90}
+
+      # Policy rule weights (from backend/src/config/index.ts)
+      POLICY_WEIGHT_TOOL_MISMATCH: ${POLICY_WEIGHT_TOOL_MISMATCH:-40}
+      POLICY_WEIGHT_BUDGET_BREACH: ${POLICY_WEIGHT_BUDGET_BREACH:-40}
+      POLICY_WEIGHT_TARGET_MISMATCH: ${POLICY_WEIGHT_TARGET_MISMATCH:-35}
+      POLICY_WEIGHT_STEP_ORDER: ${POLICY_WEIGHT_STEP_ORDER:-25}
+      POLICY_WEIGHT_MINOR_PARAM: ${POLICY_WEIGHT_MINOR_PARAM:-10}
+    volumes:
+      - checkpoint_data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional: real n8n Executor instead of the happy-path harness.
+  # Uncomment, then import n8n-workflows/travel-booking.json and set
+  # N8N_WEBHOOK_BASE_URL=http://n8n:5678 on the backend service.
+  #
+  # n8n:
+  #   image: n8nio/n8n:latest
+  #   ports:
+  #     - "5678:5678"
+  #   environment:
+  #     NIGHTS_WATCH_BACKEND: http://backend:3001
+  #   volumes:
+  #     - ./n8n-workflows:/home/node/.n8n-workflows:ro
+  #   depends_on:
+  #     backend:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+
+volumes:
+  checkpoint_data:
