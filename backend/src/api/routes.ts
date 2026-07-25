@@ -16,6 +16,9 @@ import {
   confirmDetails,
   bookFlight,
 } from "./mocks.js";
+import { runDemoSequence } from "../executor/demo-sequence.js";
+import { getRecoveryProcessMetrics } from "../recovery/process-metrics.js";
+import { config } from "../config/index.js";
 
 const StartRunBody = z.object({
   task: z
@@ -24,12 +27,33 @@ const StartRunBody = z.object({
     .default("Find and book a flight from SFO to LAX under $400"),
 });
 
+const DemoRunBody = StartRunBody.extend({
+  injectDrift: z.boolean().default(false),
+});
+
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/", async () => ({
+    ok: true,
+    service: "nights-watch",
+    phase: 6,
+    hint: "API only — UI is on the dashboard (e.g. http://localhost:5173). Try GET /health, /runs, /explanations, or WS /ws.",
+  }));
+
   app.get("/health", async () => ({
     ok: true,
     service: "nights-watch",
-    phase: 4,
+    phase: 6,
   }));
+
+  /** Policy thresholds for dashboard timeline reference lines. */
+  app.get("/config/thresholds", async () => ({
+    pause: config.pauseThreshold,
+    rollback: config.rollbackThreshold,
+    hardStop: config.hardStopThreshold,
+  }));
+
+  /** Process-local recovery aggregates (reset on backend restart). */
+  app.get("/metrics/recovery", async () => getRecoveryProcessMetrics());
 
   /** Recent explanation feed (also pushed live on /ws). */
   app.get("/explanations", async () => ({
@@ -64,6 +88,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const body = StartRunBody.parse(req.body ?? {});
     const run = await startRun(body.task);
     return reply.code(201).send(run);
+  });
+
+  /**
+   * Dashboard / CLI demo: start run and drive the shared sequence in background.
+   * Returns immediately; live progress streams on /ws.
+   */
+  app.post("/runs/demo", async (req, reply) => {
+    const body = DemoRunBody.parse(req.body ?? {});
+    const run = await startRun(body.task);
+    void runDemoSequence(run.runId, {
+      injectDrift: body.injectDrift,
+      paceMs: 1000,
+      log: (m) => req.log.info({ demo: true }, m),
+    }).catch((err) => {
+      req.log.error({ err, runId: run.runId }, "demo sequence failed");
+    });
+    return reply.code(202).send(run);
   });
 
   /** n8n / Executor step-completion callback. */

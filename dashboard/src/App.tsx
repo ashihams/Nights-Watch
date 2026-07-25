@@ -1,17 +1,31 @@
-/** Phase 0 scaffold — full dashboard lands in Phase 6. */
+import { useEffect, useState } from "react";
+import { DashboardPage } from "./pages/DashboardPage";
+import { LandingPage } from "./pages/LandingPage";
+
+function pathFromLocation(): string {
+  return window.location.pathname.replace(/\/$/, "") || "/";
+}
+
 export default function App() {
-  return (
-    <main className="mx-auto flex min-h-screen max-w-3xl flex-col justify-center gap-4 px-6">
-      <p className="text-sm tracking-[0.2em] uppercase text-[var(--nw-muted)]">
-        Nights Watch
-      </p>
-      <h1 className="text-4xl font-semibold tracking-tight">
-        Runtime resilience for AI agents
-      </h1>
-      <p className="max-w-xl text-[var(--nw-muted)]">
-        Phase 0 scaffold. Live Policy Score, checkpoints, and recovery metrics
-        arrive in Phase 6.
-      </p>
-    </main>
-  );
+  const [path, setPath] = useState(pathFromLocation);
+
+  useEffect(() => {
+    const onPop = () => setPath(pathFromLocation());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const navigate = (next: string) => {
+    const normalized = next.replace(/\/$/, "") || "/";
+    if (normalized !== pathFromLocation()) {
+      window.history.pushState({}, "", normalized);
+    }
+    setPath(normalized);
+  };
+
+  if (path === "/dashboard") {
+    return <DashboardPage onHome={() => navigate("/")} />;
+  }
+
+  return <LandingPage onOpenDashboard={() => navigate("/dashboard")} />;
 }
