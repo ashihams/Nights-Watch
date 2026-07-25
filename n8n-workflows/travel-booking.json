@@ -51,7 +51,7 @@
         "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/mocks/select",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"flightId\": \"{{$('Search Flights').item.json.options[0].id}}\"\n}",
+        "jsonBody": "={{ JSON.stringify({ flightId: [...$('Search Flights').item.json.options].sort((a, b) => a.priceUsd - b.priceUsd)[0].id }) }}",
         "options": {}
       },
       "id": "select-flight",
@@ -169,7 +169,7 @@
     "templateCredsSetupCompleted": true,
     "nightsWatch": {
       "phase": 1,
-      "notes": "Import into n8n. POST { runId, plan } to the webhook after Backend /runs/start. Set NIGHTS_WATCH_BACKEND env or edit URLs."
+      "notes": "Import into n8n. POST { runId, plan } to the webhook after Backend /runs/start. Set NIGHTS_WATCH_BACKEND env or edit URLs. Select Flight picks cheapest by priceUsd (not options[0]) so injectDrift prepend does not auto-select the $1200 bait."
     }
   }
 }

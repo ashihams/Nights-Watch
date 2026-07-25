@@ -41,6 +41,9 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return JSON.parse(text) as T;
 }
 
+/** Sticky on the run; only log when recoveryCount actually increments. */
+let lastLoggedRecoveryCount = 0;
+
 async function reportStep(input: {
   runId: string;
   stepId: string;
@@ -59,11 +62,16 @@ async function reportStep(input: {
       costUsd: input.costUsd ?? 0,
     },
   );
+  const recoveries = out.run.recoveryCount ?? 0;
   console.log(
-    `[happy-path] reported step ${input.stepId} (${input.tool}) status=${out.run.status} score=${out.run.lastPolicyScore} recoveries=${out.run.recoveryCount ?? 0}`,
+    `[happy-path] reported step ${input.stepId} (${input.tool}) status=${out.run.status} score=${out.run.lastPolicyScore} recoveries=${recoveries}`,
   );
-  if (out.run.lastRecoveryDetail) {
+  if (
+    out.run.lastRecoveryDetail &&
+    recoveries > lastLoggedRecoveryCount
+  ) {
     console.log(`[happy-path] recovery: ${out.run.lastRecoveryDetail}`);
+    lastLoggedRecoveryCount = recoveries;
   }
   const expl = out.run.lastExplanation;
   // Only print on the violating step (score still elevated in the response).
