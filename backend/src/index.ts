@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   await app.listen({ port: config.port, host: "0.0.0.0" });
   const server = app.server;
   attachDashboardWs(server);
-  console.log(`[backend] phase=4/5 listening on :${config.port} (ws=/ws)`);
+  console.log(`[backend] phase=6 listening on :${config.port} (ws=/ws)`);
 }
 
 main().catch((err) => {

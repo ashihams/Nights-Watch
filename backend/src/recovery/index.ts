@@ -21,6 +21,10 @@ import {
   recordRecoveredExecution,
   recordRecoveryDurationMs,
 } from "../otel/index.js";
+import {
+  noteRecoveredExecution,
+  noteRollbackAttempt,
+} from "./process-metrics.js";
 
 export type Severity = "low" | "medium" | "high" | "hard_stop";
 
@@ -174,6 +178,7 @@ export async function executeRecovery(input: {
 
   if (action === "hard_stop") {
     recordRollbackOutcome(false, { "run.id": input.runId, action });
+    noteRollbackAttempt(false);
     return {
       action,
       success: false,
@@ -270,6 +275,7 @@ export async function executeRecovery(input: {
     const durationMs = Date.now() - started;
     recordRecoveryDurationMs(durationMs, { "run.id": input.runId, action });
     recordRollbackOutcome(true, { "run.id": input.runId, action });
+    noteRollbackAttempt(true);
 
     return {
       action,
@@ -289,6 +295,7 @@ export async function executeRecovery(input: {
     const durationMs = Date.now() - started;
     recordRecoveryDurationMs(durationMs, { "run.id": input.runId, action });
     recordRollbackOutcome(false, { "run.id": input.runId, action });
+    noteRollbackAttempt(false);
     await withChildSpan(
       input.parentSpanContext,
       SpanNames.RECOVERY_OUTCOME,
@@ -321,4 +328,5 @@ export async function executeRecovery(input: {
 
 export function markRunRecovered(runId: string): void {
   recordRecoveredExecution({ "run.id": runId });
+  noteRecoveredExecution();
 }

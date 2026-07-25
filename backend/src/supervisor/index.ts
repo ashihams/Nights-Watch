@@ -31,6 +31,10 @@ import type { StepReport } from "../types/step-report.js";
 import type { PolicyEvaluation } from "../types/policy.js";
 import type { Explanation } from "../explanation/index.js";
 import { config } from "../config/index.js";
+import {
+  broadcastCheckpoint,
+  broadcastRunUpdate,
+} from "../api/ws-hub.js";
 
 export type RunStatus =
   | "running"
@@ -55,6 +59,8 @@ export interface ActiveRun {
   recoveryCount: number;
   recovered: boolean;
   lastRecoveryDetail?: string;
+  lastRecoveryDurationMs?: number;
+  lastRestoredCheckpointId?: string;
   lastExplanation?: Explanation;
   parentSpan: Span;
   parentSpanContext: SpanContext;
@@ -85,6 +91,8 @@ export function summarizeRun(run: ActiveRun) {
     recoveryCount: run.recoveryCount,
     recovered: run.recovered,
     lastRecoveryDetail: run.lastRecoveryDetail,
+    lastRecoveryDurationMs: run.lastRecoveryDurationMs,
+    lastRestoredCheckpointId: run.lastRestoredCheckpointId,
     lastExplanation: run.lastExplanation,
     artifacts: run.artifacts,
     policyEvaluations: run.policyEvaluations.map((e) => ({
@@ -96,6 +104,12 @@ export function summarizeRun(run: ActiveRun) {
     })),
     startedAt: run.startedAt,
   };
+}
+
+function publishRun(run: ActiveRun): ReturnType<typeof summarizeRun> {
+  const summary = summarizeRun(run);
+  broadcastRunUpdate(summary as unknown as Record<string, unknown>);
+  return summary;
 }
 
 async function emitMilestoneCheckpoint(
@@ -124,6 +138,13 @@ async function emitMilestoneCheckpoint(
     parentSpanContext: run.parentSpanContext,
   });
   run.checkpointIds.push(cp.id);
+  broadcastCheckpoint({
+    runId: run.runId,
+    checkpointId: cp.id,
+    label: cp.label,
+    index: cp.index,
+    timestamp: cp.timestamp,
+  });
   return cp.id;
 }
 
@@ -168,7 +189,7 @@ export async function startRun(task: string): Promise<ReturnType<typeof summariz
 
   console.log(`[supervisor] started ${runId} planSource=${source} steps=${plan.steps.length}`);
   console.log(`[supervisor] plan:\n${JSON.stringify(plan, null, 2)}`);
-  return summarizeRun(active);
+  return publishRun(active);
 }
 
 /** Record an Executor step completion as a child span of the run. */
@@ -262,7 +283,7 @@ export async function recordStepReport(
     console.log(
       `[supervisor] HARD STOP run=${run.runId} score=${evaluation.score}`,
     );
-    return summarizeRun(run);
+    return publishRun(run);
   }
 
   if (severity === "medium" || severity === "high") {
@@ -280,6 +301,7 @@ export async function recordStepReport(
     }
 
     run.status = "recovering";
+    publishRun(run);
     run.parentSpan.addEvent("run.recovery_started", {
       "policy.score": evaluation.score,
       severity,
@@ -310,6 +332,8 @@ export async function recordStepReport(
 
     run.recoveryCount += 1;
     run.lastRecoveryDetail = recovery.detail;
+    run.lastRecoveryDurationMs = recovery.durationMs;
+    run.lastRestoredCheckpointId = recovery.restoredCheckpointId ?? undefined;
 
     if (!recovery.success) {
       run.status = "paused";
@@ -319,7 +343,7 @@ export async function recordStepReport(
         reason: recovery.detail,
       });
       console.log(`[supervisor] recovery FAILED — paused: ${recovery.detail}`);
-      return summarizeRun(run);
+      return publishRun(run);
     }
 
     run.plan = recovery.plan;
@@ -341,7 +365,7 @@ export async function recordStepReport(
     console.log(
       `[supervisor] RESUMED run=${run.runId} via ${recovery.action} restored=${recovery.restoredCheckpointId} steps=[${recovery.completedSteps.join(",")}]`,
     );
-    return summarizeRun(run);
+    return publishRun(run);
   }
 
   const expected = [...run.plan.steps].sort((a, b) => a.order - b.order);
@@ -371,5 +395,5 @@ export async function recordStepReport(
     );
   }
 
-  return summarizeRun(run);
+  return publishRun(run);
 }
