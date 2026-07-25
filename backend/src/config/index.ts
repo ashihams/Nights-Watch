@@ -42,7 +42,7 @@ export const config = {
   signoz: {
     queryApiUrl: process.env.SIGNOZ_QUERY_API_URL ?? "http://localhost:8080",
     apiKey: process.env.SIGNOZ_API_KEY ?? "",
-    mcpEndpoint: process.env.SIGNOZ_MCP_ENDPOINT ?? "",
+    mcpEndpoint: process.env.SIGNOZ_MCP_ENDPOINT ?? "http://localhost:8000",
     mcpToken: process.env.SIGNOZ_MCP_TOKEN ?? "",
   },
   n8n: {

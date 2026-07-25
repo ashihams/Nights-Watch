@@ -1,10 +1,11 @@
 /**
- * Nights Watch Backend — Phase 5: Recovery Engine + policy + checkpoints.
+ * Nights Watch Backend — Phase 4+5: Explanation, Recovery, Policy, Checkpoints.
  */
 import Fastify from "fastify";
 import { config } from "./config/index.js";
 import { initOtel, shutdownOtel } from "./otel/index.js";
 import { registerRoutes } from "./api/routes.js";
+import { attachDashboardWs } from "./api/ws-hub.js";
 
 async function main(): Promise<void> {
   initOtel();
@@ -21,7 +22,9 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void shutdown());
 
   await app.listen({ port: config.port, host: "0.0.0.0" });
-  console.log(`[backend] phase=5 listening on :${config.port}`);
+  const server = app.server;
+  attachDashboardWs(server);
+  console.log(`[backend] phase=4/5 listening on :${config.port} (ws=/ws)`);
 }
 
 main().catch((err) => {

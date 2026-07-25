@@ -2,8 +2,8 @@
  * Supervisor — owns live execution state for a run.
  * Phase 2: local checkpoints + checkpoint.created spans.
  * Phase 3: Policy Engine on each step (Query API for prior context).
+ * Phase 4: Explanation Layer (SigNoz MCP + LLM) on pause threshold.
  * Phase 5: Recovery Engine (rollback from local store + re-plan + resume).
- * Does not call SigNoz MCP (explanation layer is Phase 4).
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -20,6 +20,7 @@ import {
 import { generatePlan } from "../planner/index.js";
 import { createCheckpoint } from "../checkpoints/index.js";
 import { evaluateStep, severityForScore } from "../policy/index.js";
+import { explainViolation } from "../explanation/index.js";
 import {
   executeRecovery,
   markRunRecovered,
@@ -28,6 +29,7 @@ import { CheckpointMilestones } from "../types/checkpoint.js";
 import type { Plan } from "../types/plan.js";
 import type { StepReport } from "../types/step-report.js";
 import type { PolicyEvaluation } from "../types/policy.js";
+import type { Explanation } from "../explanation/index.js";
 import { config } from "../config/index.js";
 
 export type RunStatus =
@@ -53,6 +55,7 @@ export interface ActiveRun {
   recoveryCount: number;
   recovered: boolean;
   lastRecoveryDetail?: string;
+  lastExplanation?: Explanation;
   parentSpan: Span;
   parentSpanContext: SpanContext;
   startedAt: string;
@@ -82,6 +85,7 @@ export function summarizeRun(run: ActiveRun) {
     recoveryCount: run.recoveryCount,
     recovered: run.recovered,
     lastRecoveryDetail: run.lastRecoveryDetail,
+    lastExplanation: run.lastExplanation,
     artifacts: run.artifacts,
     policyEvaluations: run.policyEvaluations.map((e) => ({
       stepId: e.stepId,
@@ -262,6 +266,19 @@ export async function recordStepReport(
   }
 
   if (severity === "medium" || severity === "high") {
+    // Phase 4: explain before recovery (MCP + LLM)
+    try {
+      run.lastExplanation = await explainViolation({
+        runId: run.runId,
+        plan: run.plan,
+        evaluation,
+        report,
+        parentSpanContext: run.parentSpanContext,
+      });
+    } catch (err) {
+      console.warn("[supervisor] explanation failed:", err);
+    }
+
     run.status = "recovering";
     run.parentSpan.addEvent("run.recovery_started", {
       "policy.score": evaluation.score,
@@ -314,6 +331,7 @@ export async function recordStepReport(
     run.recovered = true;
     run.status = "running";
     run.lastRecoveryDetail = recovery.detail;
+    // Keep lastExplanation for API/WS consumers; harness reads it on the pause step.
     run.parentSpan.addEvent("run.resumed", {
       "recovery.action": recovery.action,
       "checkpoint.id": recovery.restoredCheckpointId ?? "",

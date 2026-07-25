@@ -8,6 +8,7 @@ import {
   listRuns,
 } from "../supervisor/index.js";
 import { listCheckpointsForRun } from "../checkpoints/index.js";
+import { getRecentExplanations } from "./ws-hub.js";
 import { parseStepReport } from "../types/step-report.js";
 import {
   searchFlights,
@@ -27,7 +28,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({
     ok: true,
     service: "nights-watch",
-    phase: 5,
+    phase: 4,
+  }));
+
+  /** Recent explanation feed (also pushed live on /ws). */
+  app.get("/explanations", async () => ({
+    explanations: getRecentExplanations(),
   }));
 
   app.get("/runs", async () => ({

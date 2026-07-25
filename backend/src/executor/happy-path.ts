@@ -19,6 +19,12 @@ type RunState = {
   recoveryCount?: number;
   recovered?: boolean;
   lastRecoveryDetail?: string;
+  lastExplanation?: {
+    text: string;
+    mcpInvoked: boolean;
+    mcpOk: boolean;
+    source: string;
+  };
   plan?: { maxBudget: number; origin?: string; destination?: string };
 };
 
@@ -58,6 +64,13 @@ async function reportStep(input: {
   );
   if (out.run.lastRecoveryDetail) {
     console.log(`[happy-path] recovery: ${out.run.lastRecoveryDetail}`);
+  }
+  const expl = out.run.lastExplanation;
+  // Only print on the violating step (score still elevated in the response).
+  if (expl?.text && (out.run.lastPolicyScore ?? 0) >= config.pauseThreshold) {
+    console.log(
+      `[happy-path] explanation mcpInvoked=${expl.mcpInvoked} mcpOk=${expl.mcpOk}: ${expl.text}`,
+    );
   }
   return out.run;
 }
