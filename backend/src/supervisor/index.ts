@@ -1,7 +1,8 @@
 /**
  * Supervisor — owns live execution state for a run.
- * Phase 2: also writes local checkpoints + correlated checkpoint.created spans.
- * Does not call SigNoz Query API or MCP (policy / explanation come later).
+ * Phase 2: local checkpoints + checkpoint.created spans.
+ * Phase 3: Policy Engine on each step (Query API for prior context).
+ * Does not call SigNoz MCP (explanation layer comes later).
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -16,11 +17,19 @@ import {
 } from "../otel/index.js";
 import { generatePlan } from "../planner/index.js";
 import { createCheckpoint } from "../checkpoints/index.js";
+import { evaluateStep, severityForScore } from "../policy/index.js";
 import { CheckpointMilestones } from "../types/checkpoint.js";
 import type { Plan } from "../types/plan.js";
 import type { StepReport } from "../types/step-report.js";
+import type { PolicyEvaluation } from "../types/policy.js";
+import { config } from "../config/index.js";
 
-export type RunStatus = "running" | "completed" | "failed";
+export type RunStatus =
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "hard_stopped";
 
 export interface ActiveRun {
   runId: string;
@@ -33,6 +42,8 @@ export interface ActiveRun {
   artifacts: Record<string, unknown>;
   budgetConsumed: number;
   checkpointIds: string[];
+  policyEvaluations: PolicyEvaluation[];
+  lastPolicyScore: number;
   parentSpan: Span;
   parentSpanContext: SpanContext;
   startedAt: string;
@@ -58,6 +69,14 @@ export function summarizeRun(run: ActiveRun) {
     completedSteps: run.completedSteps,
     budgetConsumed: run.budgetConsumed,
     checkpointIds: run.checkpointIds,
+    lastPolicyScore: run.lastPolicyScore,
+    policyEvaluations: run.policyEvaluations.map((e) => ({
+      stepId: e.stepId,
+      score: e.score,
+      checkpointId: e.checkpointId,
+      fired: e.ruleTrace.filter((r) => r.fired).map((r) => r.ruleName),
+      timestamp: e.timestamp,
+    })),
     startedAt: run.startedAt,
   };
 }
@@ -65,7 +84,7 @@ export function summarizeRun(run: ActiveRun) {
 async function emitMilestoneCheckpoint(
   run: ActiveRun,
   milestone: (typeof CheckpointMilestones)[number],
-): Promise<void> {
+): Promise<string> {
   const cp = await createCheckpoint({
     runId: run.runId,
     index: milestone.index,
@@ -78,15 +97,17 @@ async function emitMilestoneCheckpoint(
       completedSteps: [...run.completedSteps],
       artifacts: { ...run.artifacts },
       status: run.status,
+      lastPolicyScore: run.lastPolicyScore,
     },
     budgetConsumed: run.budgetConsumed,
     trustContext: {
-      sources: ["planner", "executor", "local-store"],
+      sources: ["planner", "executor", "local-store", "policy-engine"],
       planSource: run.planSource,
     },
     parentSpanContext: run.parentSpanContext,
   });
   run.checkpointIds.push(cp.id);
+  return cp.id;
 }
 
 /** Start a run: generate plan, open parent span, checkpoint plan_generated. */
@@ -115,6 +136,8 @@ export async function startRun(task: string): Promise<ReturnType<typeof summariz
     artifacts: {},
     budgetConsumed: 0,
     checkpointIds: [],
+    policyEvaluations: [],
+    lastPolicyScore: 0,
     parentSpan,
     parentSpanContext: parentSpan.spanContext(),
     startedAt: new Date().toISOString(),
@@ -140,6 +163,8 @@ export async function recordStepReport(
   if (run.status !== "running") {
     throw new Error(`Run ${report.runId} is ${run.status}`);
   }
+
+  const completedBefore = [...run.completedSteps];
 
   await withChildSpan(
     run.parentSpanContext,
@@ -172,13 +197,60 @@ export async function recordStepReport(
     `[supervisor] step ${report.stepId} tool=${report.tool} status=${report.status} run=${report.runId}`,
   );
 
+  let checkpointId =
+    run.checkpointIds[run.checkpointIds.length - 1] ?? `${run.runId}-cp-0`;
+
   if (report.status === "success") {
     const milestone = CheckpointMilestones.find(
       (m) => m.afterStepId === report.stepId,
     );
     if (milestone) {
-      await emitMilestoneCheckpoint(run, milestone);
+      checkpointId = await emitMilestoneCheckpoint(run, milestone);
     }
+  }
+
+  // Policy evaluation (Phase 3) — after checkpoint so evaluation is anchored.
+  const evaluation = await evaluateStep({
+    runId: run.runId,
+    plan: run.plan,
+    report,
+    completedStepsBefore: completedBefore,
+    checkpointId,
+    parentSpanContext: run.parentSpanContext,
+  });
+  run.policyEvaluations.push(evaluation);
+  run.lastPolicyScore = evaluation.score;
+
+  const severity = severityForScore(evaluation.score);
+  if (severity === "hard_stop") {
+    run.status = "hard_stopped";
+    run.parentSpan.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: `hard stop: policy score ${evaluation.score} >= ${config.hardStopThreshold}`,
+    });
+    run.parentSpan.addEvent("run.hard_stopped", {
+      "policy.score": evaluation.score,
+      step: report.stepId,
+    });
+    run.parentSpan.end();
+    console.log(
+      `[supervisor] HARD STOP run=${run.runId} score=${evaluation.score}`,
+    );
+    return summarizeRun(run);
+  }
+  if (severity === "high" || severity === "medium") {
+    // Phase 3: pause on medium+; Phase 5 will add rollback/re-plan.
+    run.status = "paused";
+    run.parentSpan.addEvent("run.paused", {
+      "policy.score": evaluation.score,
+      severity,
+      step: report.stepId,
+      "pause.threshold": config.pauseThreshold,
+    });
+    console.log(
+      `[supervisor] PAUSED run=${run.runId} score=${evaluation.score} severity=${severity} (recovery in Phase 5)`,
+    );
+    return summarizeRun(run);
   }
 
   const expected = [...run.plan.steps].sort((a, b) => a.order - b.order);
@@ -196,10 +268,11 @@ export async function recordStepReport(
     run.parentSpan.addEvent("run.completed", {
       steps: run.completedSteps.join(","),
       checkpoints: run.checkpointIds.join(","),
+      "policy.lastScore": run.lastPolicyScore,
     });
     run.parentSpan.end();
     console.log(
-      `[supervisor] run ${report.runId} completed checkpoints=${run.checkpointIds.length}`,
+      `[supervisor] run ${report.runId} completed checkpoints=${run.checkpointIds.length} lastScore=${run.lastPolicyScore}`,
     );
   }
 

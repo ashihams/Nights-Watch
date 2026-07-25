@@ -27,7 +27,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({
     ok: true,
     service: "nights-watch",
-    phase: 2,
+    phase: 3,
   }));
 
   app.get("/runs", async () => ({

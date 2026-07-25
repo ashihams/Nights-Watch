@@ -14,6 +14,23 @@ export const ROLLBACK_THRESHOLD = Number(process.env.ROLLBACK_THRESHOLD ?? 70);
 /** Policy score above this hard-stops the run with no auto-resume. */
 export const HARD_STOP_THRESHOLD = Number(process.env.HARD_STOP_THRESHOLD ?? 90);
 
+/** Named policy rule weights (sum of fired weights → score, capped at 100). */
+export const POLICY_WEIGHT_TOOL_MISMATCH = Number(
+  process.env.POLICY_WEIGHT_TOOL_MISMATCH ?? 40,
+); // wrong tool vs plan — high trust break
+export const POLICY_WEIGHT_BUDGET_BREACH = Number(
+  process.env.POLICY_WEIGHT_BUDGET_BREACH ?? 40,
+); // over plan maxBudget — high
+export const POLICY_WEIGHT_TARGET_MISMATCH = Number(
+  process.env.POLICY_WEIGHT_TARGET_MISMATCH ?? 35,
+); // target not in expectedTargets — high
+export const POLICY_WEIGHT_STEP_ORDER = Number(
+  process.env.POLICY_WEIGHT_STEP_ORDER ?? 25,
+); // out-of-order / skip — medium
+export const POLICY_WEIGHT_MINOR_PARAM = Number(
+  process.env.POLICY_WEIGHT_MINOR_PARAM ?? 10,
+); // small same-tool deviation — low
+
 export const config = {
   port: Number(process.env.PORT ?? 3001),
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -42,4 +59,11 @@ export const config = {
   pauseThreshold: PAUSE_THRESHOLD,
   rollbackThreshold: ROLLBACK_THRESHOLD,
   hardStopThreshold: HARD_STOP_THRESHOLD,
+  policyWeights: {
+    toolMismatch: POLICY_WEIGHT_TOOL_MISMATCH,
+    budgetBreach: POLICY_WEIGHT_BUDGET_BREACH,
+    targetMismatch: POLICY_WEIGHT_TARGET_MISMATCH,
+    stepOrder: POLICY_WEIGHT_STEP_ORDER,
+    minorParam: POLICY_WEIGHT_MINOR_PARAM,
+  },
 } as const;

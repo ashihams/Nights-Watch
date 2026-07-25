@@ -5,6 +5,8 @@
  */
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { Resource } from "@opentelemetry/resources";
 import {
   ATTR_SERVICE_NAME,
@@ -13,16 +15,20 @@ import {
 import {
   context,
   trace,
+  metrics,
   SpanStatusCode,
   ROOT_CONTEXT,
   type Span,
   type SpanContext,
   type Tracer,
+  type Meter,
+  type Gauge,
 } from "@opentelemetry/api";
 import { config } from "../config/index.js";
 
 let sdk: NodeSDK | null = null;
 let initialized = false;
+let policyScoreGauge: Gauge | null = null;
 
 function parseOtelHeaders(raw: string): Record<string, string> {
   if (!raw.trim()) return {};
@@ -37,13 +43,18 @@ function parseOtelHeaders(raw: string): Record<string, string> {
   return headers;
 }
 
-/** Start the OTel Node SDK (traces → SigNoz OTLP HTTP). Safe to call once. */
+/** Start the OTel Node SDK (traces + metrics → SigNoz OTLP HTTP). Safe to call once. */
 export function initOtel(): void {
   if (initialized) return;
 
   const headers = parseOtelHeaders(config.otel.headers);
+  const endpoint = config.otel.endpoint.replace(/\/$/, "");
   const traceExporter = new OTLPTraceExporter({
-    url: `${config.otel.endpoint.replace(/\/$/, "")}/v1/traces`,
+    url: `${endpoint}/v1/traces`,
+    headers,
+  });
+  const metricExporter = new OTLPMetricExporter({
+    url: `${endpoint}/v1/metrics`,
     headers,
   });
 
@@ -54,10 +65,21 @@ export function initOtel(): void {
       "deployment.environment": config.nodeEnv,
     }),
     traceExporter,
+    metricReader: new PeriodicExportingMetricReader({
+      exporter: metricExporter,
+      exportIntervalMillis: 5_000,
+    }),
   });
 
   sdk.start();
   initialized = true;
+
+  const meter = getMeter();
+  policyScoreGauge = meter.createGauge("nights_watch.policy_score", {
+    description: "Policy Score (0–100) per evaluation",
+    unit: "1",
+  });
+
   console.log(
     `[otel] initialized → ${config.otel.endpoint} (service=${config.otel.serviceName})`,
   );
@@ -69,11 +91,35 @@ export async function shutdownOtel(): Promise<void> {
   await sdk.shutdown();
   sdk = null;
   initialized = false;
+  policyScoreGauge = null;
   console.log("[otel] shut down");
 }
 
 export function getTracer(name = "nights-watch"): Tracer {
   return trace.getTracer(name, "0.1.0");
+}
+
+export function getMeter(name = "nights-watch"): Meter {
+  return metrics.getMeter(name, "0.1.0");
+}
+
+/** Record Policy Score gauge (Phase 3+). */
+export function recordPolicyScore(
+  score: number,
+  attrs: Record<string, string> = {},
+): void {
+  if (!policyScoreGauge) {
+    // Lazy init if initOtel already ran but gauge missing
+    try {
+      policyScoreGauge = getMeter().createGauge("nights_watch.policy_score", {
+        description: "Policy Score (0–100) per evaluation",
+        unit: "1",
+      });
+    } catch {
+      return;
+    }
+  }
+  policyScoreGauge.record(score, attrs);
 }
 
 /** Canonical span names used across the project (Section 8 / OTel helpers). */

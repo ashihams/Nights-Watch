@@ -8,3 +8,9 @@ export {
   CheckpointMilestones,
   parseCheckpoint,
 } from "./checkpoint.js";
+export type { PolicyEvaluation, RuleResult } from "./policy.js";
+export {
+  PolicyEvaluationSchema,
+  RuleResultSchema,
+  parsePolicyEvaluation,
+} from "./policy.js";
