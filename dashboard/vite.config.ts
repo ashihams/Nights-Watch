@@ -7,7 +7,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:3001",
+      // Backend routes are unprefixed (/runs, /health, …) — strip /api.
+      "/api": {
+        target: "http://localhost:3001",
+        rewrite: (path) => path.replace(/^\/api/, "") || "/",
+      },
       "/ws": { target: "ws://localhost:3001", ws: true },
     },
   },
