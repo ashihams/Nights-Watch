@@ -1,8 +1,8 @@
 /**
- * Phase 1–3 happy-path / drift harness — simulates the n8n Executor locally.
+ * Phase 1–5 happy-path / drift+recovery harness.
  * Run:
  *   npm run happy-path
- *   npm run happy-path:drift   # inject $1200 upgrade → expect high policy score
+ *   npm run happy-path:drift   # $1200 upgrade → policy → rollback → replan → complete
  */
 import { initOtel, shutdownOtel } from "../otel/index.js";
 import { config } from "../config/index.js";
@@ -10,6 +10,17 @@ import { config } from "../config/index.js";
 const BASE = `http://127.0.0.1:${config.port}`;
 const INJECT_DRIFT =
   process.env.NW_INJECT_DRIFT === "1" || process.argv.includes("--drift");
+
+type RunState = {
+  status: string;
+  lastPolicyScore?: number;
+  completedSteps?: string[];
+  artifacts?: Record<string, unknown>;
+  recoveryCount?: number;
+  recovered?: boolean;
+  lastRecoveryDetail?: string;
+  plan?: { maxBudget: number; origin?: string; destination?: string };
+};
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -30,8 +41,8 @@ async function reportStep(input: {
   tool: string;
   result: Record<string, unknown>;
   costUsd?: number;
-}): Promise<Record<string, unknown>> {
-  const out = await postJson<{ ok: boolean; run: Record<string, unknown> }>(
+}): Promise<RunState> {
+  const out = await postJson<{ ok: boolean; run: RunState }>(
     "/webhooks/n8n/step",
     {
       runId: input.runId,
@@ -43,9 +54,24 @@ async function reportStep(input: {
     },
   );
   console.log(
-    `[happy-path] reported step ${input.stepId} (${input.tool}) status=${out.run.status} score=${out.run.lastPolicyScore}`,
+    `[happy-path] reported step ${input.stepId} (${input.tool}) status=${out.run.status} score=${out.run.lastPolicyScore} recoveries=${out.run.recoveryCount ?? 0}`,
   );
+  if (out.run.lastRecoveryDetail) {
+    console.log(`[happy-path] recovery: ${out.run.lastRecoveryDetail}`);
+  }
   return out.run;
+}
+
+function pickInBudget(
+  options: Array<{ id: string; priceUsd: number; airline: string }>,
+  maxBudget: number,
+): { id: string; priceUsd: number; airline: string } {
+  const inBudget = options
+    .filter((o) => o.priceUsd <= maxBudget && o.id !== "flt-upgrade-1200")
+    .sort((a, b) => a.priceUsd - b.priceUsd);
+  const selected = inBudget[0];
+  if (!selected) throw new Error("No in-budget flight after recovery");
+  return selected;
 }
 
 async function main(): Promise<void> {
@@ -82,7 +108,6 @@ async function main(): Promise<void> {
   }>("/mocks/search", {
     origin: run.plan.origin,
     destination: run.plan.destination,
-    // On drift path, do NOT filter by maxPrice so the $1200 option survives.
     maxPrice: INJECT_DRIFT ? undefined : run.plan.maxBudget,
     injectDrift: INJECT_DRIFT,
   });
@@ -97,21 +122,20 @@ async function main(): Promise<void> {
     result: { options: search.options },
   });
   if (state.status !== "running") {
-    console.log(`[happy-path] stopped early after search: ${JSON.stringify(state)}`);
-    await finish(run.runId);
+    console.log(`[happy-path] stopped early after search`);
+    await finish(run.runId, state);
     return;
   }
 
-  // 2) select — drift picks the $1200 upgrade; happy path picks cheapest in-budget
-  const selected = INJECT_DRIFT
+  // 2) select — drift first picks upgrade; after recovery, pick in-budget
+  let selected = INJECT_DRIFT
     ? search.options.find((o) => o.id === "flt-upgrade-1200") ??
       [...search.options].sort((a, b) => b.priceUsd - a.priceUsd)[0]
-    : [...search.options].sort((a, b) => a.priceUsd - b.priceUsd)[0];
+    : pickInBudget(search.options, run.plan.maxBudget);
   if (!selected) throw new Error("No flight to select");
-  console.log(
-    `[happy-path] selecting ${selected.id} at $${selected.priceUsd}`,
-  );
-  const selectRes = await postJson<{ selected: { id: string; priceUsd: number } }>(
+
+  console.log(`[happy-path] selecting ${selected.id} at $${selected.priceUsd}`);
+  let selectRes = await postJson<{ selected: { id: string; priceUsd: number } }>(
     "/mocks/select",
     { flightId: selected.id },
   );
@@ -122,11 +146,38 @@ async function main(): Promise<void> {
     result: { selected: selectRes.selected },
     costUsd: selectRes.selected.priceUsd,
   });
+
+  // After drift, supervisor should auto-rollback+replan and return status=running
+  if (INJECT_DRIFT && state.status === "running" && state.recovered) {
+    console.log(
+      `[happy-path] post-recovery resume; completedSteps=${(state.completedSteps ?? []).join(",")}`,
+    );
+    const searchArtifact = state.artifacts?.search as
+      | { options?: Array<{ id: string; priceUsd: number; airline: string }> }
+      | undefined;
+    const options = searchArtifact?.options ?? search.options;
+    selected = pickInBudget(options, run.plan.maxBudget);
+    console.log(
+      `[happy-path] re-selecting in-budget ${selected.id} at $${selected.priceUsd}`,
+    );
+    selectRes = await postJson<{ selected: { id: string; priceUsd: number } }>(
+      "/mocks/select",
+      { flightId: selected.id },
+    );
+    state = await reportStep({
+      runId: run.runId,
+      stepId: "select",
+      tool: "select_flight",
+      result: { selected: selectRes.selected },
+      costUsd: selectRes.selected.priceUsd,
+    });
+  }
+
   if (state.status !== "running") {
     console.log(
-      `[happy-path] stopped after select (expected on drift): status=${state.status} score=${state.lastPolicyScore}`,
+      `[happy-path] stopped after select: status=${state.status} score=${state.lastPolicyScore}`,
     );
-    await finish(run.runId);
+    await finish(run.runId, state);
     return;
   }
 
@@ -142,8 +193,8 @@ async function main(): Promise<void> {
     result: { confirmation: confirmRes.confirmation },
   });
   if (state.status !== "running") {
-    console.log(`[happy-path] stopped after confirm: ${JSON.stringify(state)}`);
-    await finish(run.runId);
+    console.log(`[happy-path] stopped after confirm`);
+    await finish(run.runId, state);
     return;
   }
 
@@ -162,12 +213,16 @@ async function main(): Promise<void> {
     costUsd: bookRes.booking.priceUsd,
   });
 
-  console.log(`[happy-path] booked ${bookRes.booking.bookingId} for $${bookRes.booking.priceUsd}`);
-  await finish(run.runId);
+  console.log(
+    `[happy-path] booked ${bookRes.booking.bookingId} for $${bookRes.booking.priceUsd}`,
+  );
+  await finish(run.runId, state);
 }
 
-async function finish(runId: string): Promise<void> {
-  console.log(`[happy-path] done — run.id=${runId}`);
+async function finish(runId: string, state: RunState): Promise<void> {
+  console.log(
+    `[happy-path] done — run.id=${runId} status=${state.status} recoveries=${state.recoveryCount ?? 0} recovered=${state.recovered ?? false}`,
+  );
   console.log(`[happy-path] local checkpoints: npm run checkpoints:list -- ${runId}`);
   console.log(`[happy-path] ClickHouse spans:  npm run spans:verify -- ${runId}`);
   await new Promise((r) => setTimeout(r, 2500));

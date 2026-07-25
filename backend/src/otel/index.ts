@@ -23,12 +23,21 @@ import {
   type Tracer,
   type Meter,
   type Gauge,
+  type Counter,
+  type Histogram,
 } from "@opentelemetry/api";
 import { config } from "../config/index.js";
 
 let sdk: NodeSDK | null = null;
 let initialized = false;
 let policyScoreGauge: Gauge | null = null;
+let recoveryAttemptsCounter: Counter | null = null;
+let rollbackSuccessCounter: Counter | null = null;
+let rollbackFailCounter: Counter | null = null;
+let recoveredExecutionsCounter: Counter | null = null;
+let recoveryDurationHistogram: Histogram | null = null;
+let falsePositiveNumerator: Counter | null = null;
+let falsePositiveDenominator: Counter | null = null;
 
 function parseOtelHeaders(raw: string): Record<string, string> {
   if (!raw.trim()) return {};
@@ -79,7 +88,38 @@ export function initOtel(): void {
     description: "Policy Score (0–100) per evaluation",
     unit: "1",
   });
-
+  recoveryAttemptsCounter = meter.createCounter("nights_watch.recovery_attempts", {
+    description: "Recovery attempts (rollback or re-plan)",
+  });
+  rollbackSuccessCounter = meter.createCounter("nights_watch.rollback_success", {
+    description: "Successful rollback/re-plan outcomes",
+  });
+  rollbackFailCounter = meter.createCounter("nights_watch.rollback_failure", {
+    description: "Failed rollback/re-plan outcomes",
+  });
+  recoveredExecutionsCounter = meter.createCounter(
+    "nights_watch.recovered_executions",
+    {
+      description:
+        "Runs that hit ≥1 policy violation but still completed the goal",
+    },
+  );
+  recoveryDurationHistogram = meter.createHistogram(
+    "nights_watch.recovery_duration_ms",
+    {
+      description: "Recovery duration from start to ready-to-resume (ms)",
+      unit: "ms",
+    },
+  );
+  // False-positive tracking seeded by fixtures in Phase 5+ demos
+  falsePositiveNumerator = meter.createCounter(
+    "nights_watch.false_positive_violations",
+    { description: "Violations labeled false positive (fixture-seeded)" },
+  );
+  falsePositiveDenominator = meter.createCounter(
+    "nights_watch.total_flagged_violations",
+    { description: "Total policy violations flagged" },
+  );
   console.log(
     `[otel] initialized → ${config.otel.endpoint} (service=${config.otel.serviceName})`,
   );
@@ -92,6 +132,13 @@ export async function shutdownOtel(): Promise<void> {
   sdk = null;
   initialized = false;
   policyScoreGauge = null;
+  recoveryAttemptsCounter = null;
+  rollbackSuccessCounter = null;
+  rollbackFailCounter = null;
+  recoveredExecutionsCounter = null;
+  recoveryDurationHistogram = null;
+  falsePositiveNumerator = null;
+  falsePositiveDenominator = null;
   console.log("[otel] shut down");
 }
 
@@ -108,18 +155,96 @@ export function recordPolicyScore(
   score: number,
   attrs: Record<string, string> = {},
 ): void {
-  if (!policyScoreGauge) {
-    // Lazy init if initOtel already ran but gauge missing
-    try {
-      policyScoreGauge = getMeter().createGauge("nights_watch.policy_score", {
-        description: "Policy Score (0–100) per evaluation",
-        unit: "1",
-      });
-    } catch {
-      return;
-    }
+  ensureInstruments();
+  policyScoreGauge?.record(score, attrs);
+}
+
+export function recordRecoveryAttempt(
+  action: string,
+  attrs: Record<string, string> = {},
+): void {
+  ensureInstruments();
+  recoveryAttemptsCounter?.add(1, { ...attrs, action });
+}
+
+export function recordRollbackOutcome(
+  success: boolean,
+  attrs: Record<string, string> = {},
+): void {
+  ensureInstruments();
+  if (success) rollbackSuccessCounter?.add(1, attrs);
+  else rollbackFailCounter?.add(1, attrs);
+}
+
+export function recordRecoveredExecution(
+  attrs: Record<string, string> = {},
+): void {
+  ensureInstruments();
+  recoveredExecutionsCounter?.add(1, attrs);
+}
+
+export function recordRecoveryDurationMs(
+  ms: number,
+  attrs: Record<string, string> = {},
+): void {
+  ensureInstruments();
+  recoveryDurationHistogram?.record(ms, attrs);
+}
+
+export function recordViolationFlagged(
+  labeledFalsePositive: boolean,
+  attrs: Record<string, string> = {},
+): void {
+  ensureInstruments();
+  falsePositiveDenominator?.add(1, attrs);
+  if (labeledFalsePositive) falsePositiveNumerator?.add(1, attrs);
+}
+
+function ensureInstruments(): void {
+  if (policyScoreGauge && recoveryAttemptsCounter) return;
+  try {
+    const meter = getMeter();
+    policyScoreGauge ??= meter.createGauge("nights_watch.policy_score", {
+      description: "Policy Score (0–100) per evaluation",
+      unit: "1",
+    });
+    recoveryAttemptsCounter ??= meter.createCounter(
+      "nights_watch.recovery_attempts",
+      { description: "Recovery attempts (rollback or re-plan)" },
+    );
+    rollbackSuccessCounter ??= meter.createCounter(
+      "nights_watch.rollback_success",
+      { description: "Successful rollback/re-plan outcomes" },
+    );
+    rollbackFailCounter ??= meter.createCounter(
+      "nights_watch.rollback_failure",
+      { description: "Failed rollback/re-plan outcomes" },
+    );
+    recoveredExecutionsCounter ??= meter.createCounter(
+      "nights_watch.recovered_executions",
+      {
+        description:
+          "Runs that hit ≥1 policy violation but still completed the goal",
+      },
+    );
+    recoveryDurationHistogram ??= meter.createHistogram(
+      "nights_watch.recovery_duration_ms",
+      {
+        description: "Recovery duration from start to ready-to-resume (ms)",
+        unit: "ms",
+      },
+    );
+    falsePositiveNumerator ??= meter.createCounter(
+      "nights_watch.false_positive_violations",
+      { description: "Violations labeled false positive (fixture-seeded)" },
+    );
+    falsePositiveDenominator ??= meter.createCounter(
+      "nights_watch.total_flagged_violations",
+      { description: "Total policy violations flagged" },
+    );
+  } catch {
+    // metrics SDK not ready
   }
-  policyScoreGauge.record(score, attrs);
 }
 
 /** Canonical span names used across the project (Section 8 / OTel helpers). */

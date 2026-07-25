@@ -2,7 +2,8 @@
  * Supervisor — owns live execution state for a run.
  * Phase 2: local checkpoints + checkpoint.created spans.
  * Phase 3: Policy Engine on each step (Query API for prior context).
- * Does not call SigNoz MCP (explanation layer comes later).
+ * Phase 5: Recovery Engine (rollback from local store + re-plan + resume).
+ * Does not call SigNoz MCP (explanation layer is Phase 4).
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -14,10 +15,15 @@ import {
   SpanNames,
   startParentSpan,
   withChildSpan,
+  recordViolationFlagged,
 } from "../otel/index.js";
 import { generatePlan } from "../planner/index.js";
 import { createCheckpoint } from "../checkpoints/index.js";
 import { evaluateStep, severityForScore } from "../policy/index.js";
+import {
+  executeRecovery,
+  markRunRecovered,
+} from "../recovery/index.js";
 import { CheckpointMilestones } from "../types/checkpoint.js";
 import type { Plan } from "../types/plan.js";
 import type { StepReport } from "../types/step-report.js";
@@ -29,7 +35,8 @@ export type RunStatus =
   | "paused"
   | "completed"
   | "failed"
-  | "hard_stopped";
+  | "hard_stopped"
+  | "recovering";
 
 export interface ActiveRun {
   runId: string;
@@ -38,12 +45,14 @@ export interface ActiveRun {
   planSource: "llm" | "deterministic_fallback";
   status: RunStatus;
   completedSteps: string[];
-  /** Accumulated artifacts for checkpoint.state / resume. */
   artifacts: Record<string, unknown>;
   budgetConsumed: number;
   checkpointIds: string[];
   policyEvaluations: PolicyEvaluation[];
   lastPolicyScore: number;
+  recoveryCount: number;
+  recovered: boolean;
+  lastRecoveryDetail?: string;
   parentSpan: Span;
   parentSpanContext: SpanContext;
   startedAt: string;
@@ -70,6 +79,10 @@ export function summarizeRun(run: ActiveRun) {
     budgetConsumed: run.budgetConsumed,
     checkpointIds: run.checkpointIds,
     lastPolicyScore: run.lastPolicyScore,
+    recoveryCount: run.recoveryCount,
+    recovered: run.recovered,
+    lastRecoveryDetail: run.lastRecoveryDetail,
+    artifacts: run.artifacts,
     policyEvaluations: run.policyEvaluations.map((e) => ({
       stepId: e.stepId,
       score: e.score,
@@ -101,7 +114,7 @@ async function emitMilestoneCheckpoint(
     },
     budgetConsumed: run.budgetConsumed,
     trustContext: {
-      sources: ["planner", "executor", "local-store", "policy-engine"],
+      sources: ["planner", "executor", "local-store", "policy-engine", "recovery"],
       planSource: run.planSource,
     },
     parentSpanContext: run.parentSpanContext,
@@ -138,6 +151,8 @@ export async function startRun(task: string): Promise<ReturnType<typeof summariz
     checkpointIds: [],
     policyEvaluations: [],
     lastPolicyScore: 0,
+    recoveryCount: 0,
+    recovered: false,
     parentSpan,
     parentSpanContext: parentSpan.spanContext(),
     startedAt: new Date().toISOString(),
@@ -209,7 +224,6 @@ export async function recordStepReport(
     }
   }
 
-  // Policy evaluation (Phase 3) — after checkpoint so evaluation is anchored.
   const evaluation = await evaluateStep({
     runId: run.runId,
     plan: run.plan,
@@ -221,7 +235,15 @@ export async function recordStepReport(
   run.policyEvaluations.push(evaluation);
   run.lastPolicyScore = evaluation.score;
 
+  if (evaluation.score > 0) {
+    recordViolationFlagged(false, {
+      "run.id": run.runId,
+      "step.id": report.stepId,
+    });
+  }
+
   const severity = severityForScore(evaluation.score);
+
   if (severity === "hard_stop") {
     run.status = "hard_stopped";
     run.parentSpan.setStatus({
@@ -238,17 +260,68 @@ export async function recordStepReport(
     );
     return summarizeRun(run);
   }
-  if (severity === "high" || severity === "medium") {
-    // Phase 3: pause on medium+; Phase 5 will add rollback/re-plan.
-    run.status = "paused";
-    run.parentSpan.addEvent("run.paused", {
+
+  if (severity === "medium" || severity === "high") {
+    run.status = "recovering";
+    run.parentSpan.addEvent("run.recovery_started", {
       "policy.score": evaluation.score,
       severity,
       step: report.stepId,
-      "pause.threshold": config.pauseThreshold,
     });
     console.log(
-      `[supervisor] PAUSED run=${run.runId} score=${evaluation.score} severity=${severity} (recovery in Phase 5)`,
+      `[supervisor] recovering run=${run.runId} score=${evaluation.score} severity=${severity}`,
+    );
+
+    const recovery = await executeRecovery({
+      runId: run.runId,
+      task: run.task,
+      severity,
+      evaluation,
+      snapshot: {
+        task: run.task,
+        plan: run.plan,
+        planSource: run.planSource,
+        completedSteps: run.completedSteps,
+        artifacts: run.artifacts,
+        budgetConsumed: run.budgetConsumed,
+        checkpointIds: run.checkpointIds,
+        status: run.status,
+      },
+      parentSpanContext: run.parentSpanContext,
+      avoidDriftHint: true,
+    });
+
+    run.recoveryCount += 1;
+    run.lastRecoveryDetail = recovery.detail;
+
+    if (!recovery.success) {
+      run.status = "paused";
+      run.parentSpan.addEvent("run.paused", {
+        "policy.score": evaluation.score,
+        severity,
+        reason: recovery.detail,
+      });
+      console.log(`[supervisor] recovery FAILED — paused: ${recovery.detail}`);
+      return summarizeRun(run);
+    }
+
+    run.plan = recovery.plan;
+    run.planSource = recovery.planSource;
+    run.completedSteps = recovery.completedSteps;
+    run.artifacts = recovery.artifacts;
+    run.budgetConsumed = recovery.budgetConsumed;
+    run.checkpointIds = recovery.checkpointIds;
+    run.recovered = true;
+    run.status = "running";
+    run.lastRecoveryDetail = recovery.detail;
+    run.parentSpan.addEvent("run.resumed", {
+      "recovery.action": recovery.action,
+      "checkpoint.id": recovery.restoredCheckpointId ?? "",
+      "completedSteps": recovery.completedSteps.join(","),
+      "durationMs": recovery.durationMs,
+    });
+    console.log(
+      `[supervisor] RESUMED run=${run.runId} via ${recovery.action} restored=${recovery.restoredCheckpointId} steps=[${recovery.completedSteps.join(",")}]`,
     );
     return summarizeRun(run);
   }
@@ -264,15 +337,19 @@ export async function recordStepReport(
     run.parentSpan.end();
   } else if (allDone) {
     run.status = "completed";
+    if (run.recovered || run.recoveryCount > 0) {
+      markRunRecovered(run.runId);
+    }
     run.parentSpan.setStatus({ code: SpanStatusCode.OK });
     run.parentSpan.addEvent("run.completed", {
       steps: run.completedSteps.join(","),
       checkpoints: run.checkpointIds.join(","),
       "policy.lastScore": run.lastPolicyScore,
+      "recovery.count": run.recoveryCount,
     });
     run.parentSpan.end();
     console.log(
-      `[supervisor] run ${report.runId} completed checkpoints=${run.checkpointIds.length} lastScore=${run.lastPolicyScore}`,
+      `[supervisor] run ${report.runId} completed checkpoints=${run.checkpointIds.length} recoveries=${run.recoveryCount} lastScore=${run.lastPolicyScore}`,
     );
   }
 

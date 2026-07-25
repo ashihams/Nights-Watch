@@ -3,6 +3,7 @@
  * Rollback (Phase 5) must read from this store, never from SigNoz.
  */
 import type { SpanContext } from "@opentelemetry/api";
+import { randomUUID } from "node:crypto";
 import { SpanNames, withChildSpan } from "../otel/index.js";
 import type { Checkpoint, CheckpointMilestoneLabel } from "../types/checkpoint.js";
 import {
@@ -20,6 +21,8 @@ export interface CreateCheckpointInput {
   state: Record<string, unknown>;
   budgetConsumed: number;
   trustContext?: Record<string, unknown>;
+  /** Optional explicit id; auto-generated uniquely when omitted. */
+  id?: string;
   /** Parent run span — checkpoint.created becomes a child in the same trace. */
   parentSpanContext: SpanContext;
 }
@@ -28,7 +31,8 @@ export async function createCheckpoint(
   input: CreateCheckpointInput,
 ): Promise<Checkpoint> {
   const timestamp = new Date().toISOString();
-  const id = `${input.runId}-cp-${input.index}`;
+  // Unique id so post-recovery re-checkpoints at the same milestone don't collide.
+  const id = input.id ?? `${input.runId}-cp-${input.index}-${randomUUID().slice(0, 8)}`;
 
   const checkpoint: Checkpoint = {
     id,

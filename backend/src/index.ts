@@ -1,5 +1,5 @@
 /**
- * Nights Watch Backend — Phase 3: Policy Engine + checkpoints + executor wiring.
+ * Nights Watch Backend — Phase 5: Recovery Engine + policy + checkpoints.
  */
 import Fastify from "fastify";
 import { config } from "./config/index.js";
@@ -21,7 +21,7 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void shutdown());
 
   await app.listen({ port: config.port, host: "0.0.0.0" });
-  console.log(`[backend] phase=3 listening on :${config.port}`);
+  console.log(`[backend] phase=5 listening on :${config.port}`);
 }
 
 main().catch((err) => {
