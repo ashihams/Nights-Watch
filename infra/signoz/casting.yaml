@@ -1,11 +1,13 @@
+# Prefer the repo-root casting.yaml (judge-facing).
+# Kept here for local Foundry workflows under infra/signoz/.
 apiVersion: v1alpha1
 kind: Installation
 metadata:
-  name: signoz
+  name: nights-watch-signoz
 spec:
   deployment:
-    flavor: compose
     mode: docker
+    flavor: compose
   mcp:
     spec:
       enabled: true

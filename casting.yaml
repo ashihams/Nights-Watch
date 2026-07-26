@@ -1,0 +1,15 @@
+# Nights Watch — SigNoz Foundry casting (judge-reproducible).
+# Deploy: foundryctl cast -f casting.yaml
+# Forge only (generates pours/ + casting.yaml.lock): foundryctl forge -f casting.yaml
+apiVersion: v1alpha1
+kind: Installation
+metadata:
+  name: nights-watch-signoz
+spec:
+  deployment:
+    mode: docker
+    flavor: compose
+  # Explanation Layer uses SigNoz MCP — keep enabled for the demo path.
+  mcp:
+    spec:
+      enabled: true

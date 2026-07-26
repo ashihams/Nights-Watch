@@ -43,11 +43,13 @@ Desktop.ini
 *.swp
 *.swo
 
-# === SigNoz local infra (generated / bulky) ===
+# === SigNoz Foundry (generated pours are local-only; casting + lock are committed) ===
+pours/
 infra/signoz/foundry.tar.gz
 infra/signoz/foundry_windows_amd64/
 infra/signoz/pours/
-infra/signoz/*.lock
+# Keep infra/signoz/casting.yaml in sync with root; prefer root casting.yaml.lock
+infra/signoz/casting.yaml.lock
 
 # === Third-party clones (install separately) ===
 agent-skills/
