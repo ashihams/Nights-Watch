@@ -2,7 +2,7 @@
 
 Timed walkthrough for judges. **Target: ~4:30.** Rehearse twice with a stopwatch before presenting.
 
-**Live control room:** _TBD — Vercel URL after Render + Vercel deploy._  
+**Live control room:** https://nights-watch-control.vercel.app/  
 Free live link (Vercel UI + Render API; SigNoz = local video): see [README — Live deployment](./README.md#live-deployment).
 
 **Tabs to pre-open**

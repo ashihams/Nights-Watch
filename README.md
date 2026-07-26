@@ -20,7 +20,7 @@ Companion docs: [`PROJECT_OVERVIEW.md`](./PROJECT_OVERVIEW.md) · [`CURSOR_GUIDE
 | 5 | Recovery Engine (rollback → re-plan → resume) | Done |
 | 6 | Live React dashboard (Art Deco control room) | Done |
 | 7 | Human approval + pre-irreversible checkpoints | Done |
-| 8 | Demo prep (README, casting, demo script, free live link) | In progress · Vercel + Render |
+| 8 | Demo prep (README, casting, demo script, free live link) | Done · live on Vercel + Render |
 
 ---
 
@@ -208,7 +208,8 @@ Timed walkthrough: [`demoscript.md`](./demoscript.md).
 
 ## Live deployment
 
-**Live URL (control room):** _TBD — paste the Vercel URL after deploy._
+**Live URL (control room):** https://nights-watch-control.vercel.app/  
+**API:** https://nights-watch-backend.onrender.com/ (`VITE_API_URL` / CORS → this origin)
 
 ### Quick free path: Vercel (UI) + Render (API)
 
