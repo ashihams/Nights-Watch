@@ -1,7 +1,11 @@
 /**
  * Same-origin (Docker nginx / Vite proxy): `/api/*` and `/ws`.
- * Split hosting (Vercel + Render): set VITE_API_URL to the backend origin.
+ * Split hosting (Vercel + Render): set VITE_API_URL, or rely on the
+ * *.vercel.app fallback / vercel.json /api rewrite.
  */
+
+/** Production Render backend (hackathon live link). */
+const RENDER_API = "https://nights-watch-backend.onrender.com";
 
 function trimSlash(url: string): string {
   return url.replace(/\/+$/, "");
@@ -10,7 +14,17 @@ function trimSlash(url: string): string {
 /** Base URL for REST (no trailing slash). Empty = same-origin `/api` prefix. */
 export function apiBase(): string {
   const raw = import.meta.env.VITE_API_URL;
-  return typeof raw === "string" && raw.trim() ? trimSlash(raw.trim()) : "";
+  if (typeof raw === "string" && raw.trim()) {
+    return trimSlash(raw.trim());
+  }
+  // If env was forgotten at build time, still hit Render from the Vercel host.
+  if (
+    typeof window !== "undefined" &&
+    window.location.hostname.endsWith(".vercel.app")
+  ) {
+    return RENDER_API;
+  }
+  return "";
 }
 
 /** Absolute or relative path for a backend route like `/runs` or `/health`. */

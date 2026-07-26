@@ -8,13 +8,14 @@ import type {
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(apiUrl(path), {
+  const url = apiUrl(path);
+  const res = await fetch(url, {
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
     ...init,
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`${path} → ${res.status}: ${text}`);
+    throw new Error(`${url} → ${res.status}: ${text}`);
   }
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
