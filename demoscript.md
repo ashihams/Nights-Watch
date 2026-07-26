@@ -2,8 +2,8 @@
 
 Timed walkthrough for judges. **Target: ~4:30.** Rehearse twice with a stopwatch before presenting.
 
-**Live control room (always-on):** _TBD — same URL as README “Live URL” after VPS verify._  
-Always-on deploy (CX32, SigNoz internal-only, checklist): see [README — Live deployment](./README.md#live-deployment-always-on-judge-link).
+**Live control room (always-on):** _TBD — `https://<ip-with-dashes>.nip.io` after Oracle verify._  
+Free always-on deploy (Oracle Ampere 2 OCPU / 12 GB, Caddy + nip.io, SigNoz internal-only): see [README — Live deployment](./README.md#live-deployment-always-on-judge-link).
 
 **Tabs to pre-open**
 

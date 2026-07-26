@@ -208,13 +208,16 @@ Timed walkthrough: [`demoscript.md`](./demoscript.md).
 
 Judges need a URL that stays up when your laptop is off. **Do not** use a laptop Cloudflare/ngrok quick tunnel as the submission link.
 
-**Live URL:** _TBD — paste the stable HTTPS URL here after the verification checklist passes._
+**Free default:** [Oracle Cloud Always Free](https://www.oracle.com/cloud/free/) Ampere A1 + **Caddy** + **[nip.io](https://nip.io)** hostname (no domain purchase, no Cloudflare account).
 
-### Architecture on the VPS
+**Live URL:** _TBD — paste `https://<public-ip-with-dashes>.nip.io` here after the checklist passes._
+
+### Architecture
 
 ```mermaid
 flowchart LR
-  Judges[Judges browser] -->|HTTPS public| Nginx[Dashboard nginx]
+  Judges[Judges browser] -->|HTTPS nip.io| Caddy[Caddy on VPS]
+  Caddy -->|127.0.0.1:5173 only| Nginx[Dashboard nginx]
   Nginx -->|same Docker network| API[Backend]
   API -->|OTLP Query MCP internal only| SigNoz[Foundry SigNoz localhost]
   Ops[Operator] -->|SSH local forward| SigNoz
@@ -224,79 +227,182 @@ Same-origin nginx already proxies `/api` and `/ws` — **no** CORS or `VITE_API_
 
 | Surface | Public? | How |
 |---|---|---|
-| Control room (`:5173` → nginx) | **Yes** | Caddy/TLS or named Cloudflare Tunnel **on the VPS** → `127.0.0.1:5173` only |
+| Control room (`:5173` → nginx) | **Yes** | Caddy → `127.0.0.1:5173` only (HTTPS via Let's Encrypt on nip.io) |
 | Backend `:3001` | No | Loopback; reached via nginx `/api` and `/ws` |
-| SigNoz UI `:8080`, MCP `:8000`, OTLP `:4317`/`:4318` | **No** | Loopback / host-gateway only. Firewall deny. Ops: `ssh -L 8080:127.0.0.1:8080 user@vps` |
+| SigNoz UI `:8080`, MCP `:8000`, OTLP `:4317`/`:4318` | **No** | Never open in OCI Security List. Ops: `ssh -L 8080:127.0.0.1:8080 ubuntu@<ip>` |
 
-Graceful degradation is intentional: if SigNoz is down, the app still runs (`signoz.mcp.degraded` / query degraded). Trace proof for judges lives in the **recorded demo video**.
+**Critical:** Caddy must reverse-proxy the **dashboard** (`5173`), **not** SigNoz (`8080`). Pointing Caddy at `8080` would put the unauthenticated SigNoz UI on the open internet.
 
-### Sizing
+Graceful degradation: if SigNoz is down, the app still runs. Trace proof for judges can live in the **recorded demo video**.
 
-| Tier | Spec | Use |
+### Sizing (Oracle Always Free — current limits)
+
+As of **15 Jun 2026**, Always Free Ampere A1 is **2 OCPU / 12 GB total** (not the older 4 / 24 in many guides). Provision **2 OCPU / 12 GB** from the start — enough headroom for SigNoz (docs minimum ~4 GB) + this app. Do not request the old 4/24; accounts still on the old shape have been resized or shut down.
+
+| Shape | Spec | Use |
 |---|---|---|
-| **CX32 (recommended)** | 2 vCPU / **8 GB** | Default for unattended judging (ClickHouse + SigNoz + MCP + app) |
-| CX22 | 2 vCPU / 4 GB | Minimum workable — OOM risk under load; avoid for the submission window |
+| **VM.Standard.A1.Flex (default)** | **2 OCPU / 12 GB** Arm | Free always-on judge link |
+| Paid CX32 / similar | 8 GB+ x86 | Only if Oracle capacity blocks you |
 
-Concrete default: **Hetzner Cloud CX32** (or any Linux VM with ≥8 GB RAM).
+**Fallback if Ampere stays “Out of capacity”:** stop burning hours — switch to an app-only free host (e.g. Fly.io) with SigNoz omitted (degraded mode + demo video). That path needs a separate compose/env pass; do not block the submission on OCI capacity forever.
 
-### Provision steps
+### 1. Create the Oracle Cloud account
 
-1. Create the VM (Ubuntu 22.04/24.04), SSH in, install Docker Engine + Compose plugin + `foundryctl` (`curl -fsSL https://signoz.io/foundry.sh | bash`).
-2. Clone this repo; `cp .env.example .env` (LLM keys optional).
-3. Cast SigNoz (internal):
-   ```bash
-   foundryctl cast -f casting.yaml
-   ```
-   Harden: **ufw allow 22,80,443** (or only 22 if using Cloudflare Tunnel only) and **deny** `8080`, `8000`, `4317`, `4318`, `3001` from the public internet. Prefer rebinding Foundry published ports to `127.0.0.1` in the generated compose under `pours/` if they appear as `0.0.0.0`.
-4. Start the app with the VPS overlay (loopback binds):
-   ```bash
-   docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d --build
-   ```
-5. Expose **dashboard only**:
-   - **Cloudflare Tunnel (named, on the VPS):** point the public hostname at `http://127.0.0.1:5173` — nothing else.
-   - **Or Caddy** on `:443` reverse-proxying to `127.0.0.1:5173` with automatic TLS.
-6. Paste the HTTPS URL into **Live URL** above and into [`demoscript.md`](./demoscript.md).
+1. Sign up at [oracle.com/cloud/free](https://www.oracle.com/cloud/free/) (phone + card for identity; you are not charged unless you upgrade).
+2. Pick a **home region** close to you or judges — it cannot be changed later without a new account.
 
-### Backend → SigNoz on Linux (`host.docker.internal`)
+### 2. Create the compute instance
 
-[`docker-compose.yml`](./docker-compose.yml) already sets:
+Console → **Compute → Instances → Create instance**.
 
-- `OTEL_*` / `SIGNOZ_*` → `http://host.docker.internal:{4318,8080,8000}`
-- `extra_hosts: host.docker.internal:host-gateway`
+1. Name: e.g. `nights-watch-vps`.
+2. **Image and shape → Edit → Change shape:** Ampere → `VM.Standard.A1.Flex` → **2 OCPUs / 12 GB**.
+3. Image: **Ubuntu 24.04** (or 22.04).
+4. SSH: **Generate a key pair** and download the private key.
+5. Default VCN → **Create**.
 
-That works on Docker Engine for Linux; **verify once** on a fresh VPS (behavior can differ from WSL/Docker Desktop):
+If **Out of capacity for shape VM.Standard.A1.Flex**: try another Availability Domain, retry every 10–15 minutes, or fall back to app-only free hosting (above).
+
+### 3. SSH in
+
+```bash
+chmod 600 ~/Downloads/ssh-key-*.key
+ssh -i ~/Downloads/ssh-key-*.key ubuntu@<public-ip>
+```
+
+### 4. Open only ports 80 and 443 (both firewall layers)
+
+OCI has a **cloud** Security List **and** a default **iptables** firewall — both must allow the port.
+
+**Cloud (Console):** Instance → subnet → Security Lists → default → **Add Ingress Rules**:
+
+- Source `0.0.0.0/0`, TCP **80** (Let's Encrypt HTTP-01)
+- Source `0.0.0.0/0`, TCP **443** (HTTPS)
+
+Do **not** open `8080`, `4317`, `4318`, `8000`, or `3001`.
+
+**OS (inside SSH):**
+
+```bash
+sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT
+sudo apt-get update && sudo apt-get install -y iptables-persistent
+sudo netfilter-persistent save
+```
+
+### 5. Install Docker
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER
+newgrp docker
+docker --version
+```
+
+### 6. Clone the repo
+
+```bash
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/ashihams/Nights-Watch.git
+cd Nights-Watch
+# Prefer the branch with deploy overlays if not yet on main:
+# git checkout feature/phase-8-demo-prep
+```
+
+### 7. Foundry SigNoz (internal-only)
+
+```bash
+curl -fsSL https://signoz.io/foundry.sh | bash
+source ~/.bashrc
+foundryctl version
+foundryctl cast -f casting.yaml
+curl -s http://127.0.0.1:8080/api/v1/health   # OK from the VM
+```
+
+With 8080 closed in the Security List, the internet cannot reach SigNoz.
+
+### 8. App env + compose (loopback publish)
+
+```bash
+cp .env.example .env
+# Optional: ANTHROPIC_API_KEY / OPENAI_API_KEY
+# Leave SIGNOZ_* / OTEL_* for compose defaults (host.docker.internal)
+
+docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.vps.yml ps
+curl -s http://127.0.0.1:3001/health
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5173/
+```
+
+[`docker-compose.vps.yml`](./docker-compose.vps.yml) binds dashboard/backend to `127.0.0.1` so only Caddy (on the host) is public.
+
+**Verify backend → SigNoz** (Linux `host-gateway`; do not assume WSL/Desktop behavior):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.vps.yml exec backend \
   node -e "fetch('http://host.docker.internal:8080/api/v1/health').then(r=>console.log(r.status)).catch(e=>{console.error(e);process.exit(1)})"
 ```
 
-Expect `200`. If it fails, confirm SigNoz is listening on the host loopback and that `host-gateway` resolves inside the container (`getent hosts host.docker.internal`).
+Expect `200`.
 
-### Verification checklist (before calling Phase 8 done)
+### 9. Caddy + nip.io (HTTPS, no domain)
 
-Automated smoke (on the VPS):
+Default hostname: public IP with dots → dashes + `.nip.io`  
+(e.g. `203.0.113.45` → `https://203-0-113-45.nip.io`).
+
+```bash
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update && sudo apt-get install -y caddy
+
+IP=$(curl -s ifconfig.me)
+HOST="${IP//./-}.nip.io"
+echo "Judge URL will be: https://${HOST}"
+
+sudo tee /etc/caddy/Caddyfile <<EOF
+${HOST} {
+    reverse_proxy 127.0.0.1:5173
+}
+EOF
+sudo systemctl enable --now caddy
+sudo systemctl reload caddy
+```
+
+First HTTPS hit may take 10–30s while Let's Encrypt issues the cert. If you already own a domain, put that name in the Caddyfile instead of nip.io and point DNS A → the instance IP.
+
+### 10. Keep it alive across reboot
+
+```bash
+docker update --restart unless-stopped $(docker ps -q)
+sudo systemctl enable caddy
+```
+
+### 11. Verification checklist (before Phase 8 Done)
 
 ```bash
 chmod +x scripts/verify-vps-deploy.sh
-./scripts/verify-vps-deploy.sh https://YOUR-PUBLIC-HOST
-# optional: PUBLIC_HOST=YOUR.VPS.IP ./scripts/verify-vps-deploy.sh https://YOUR-PUBLIC-HOST
+./scripts/verify-vps-deploy.sh "https://${HOST}"
+# optional: PUBLIC_HOST=$IP ./scripts/verify-vps-deploy.sh "https://${HOST}"
 ```
 
-Manual gates (required):
+Manual gates:
 
-- [ ] Public URL works from **outside** home/VPS network (phone on **mobile data**)
-- [ ] In-container SigNoz health via `host.docker.internal` succeeds (command above)
-- [ ] Full interactive loop over the public link: **Start run (inject drift)** → pause → **Reject & recover** → booking completes
-- [ ] Stop SigNoz once on the VPS; control room still loads and degrades cleanly (no hard error for judges)
-- [ ] Confirm SigNoz ports are **not** reachable from the public internet
-- [ ] Live URL pasted into this README + demoscript
+- [ ] Public URL works on **phone mobile data** (not home Wi‑Fi / not from the VM)
+- [ ] Padlock HTTPS, dashboard loads, `/api/health` OK
+- [ ] In-container SigNoz health via `host.docker.internal` (step 8)
+- [ ] **Start run (inject drift)** → **Reject & recover** → booking completes
+- [ ] Stop SigNoz once; control room still loads / degrades cleanly
+- [ ] `8080` / `8000` / `4318` **not** reachable from the public internet
+- [ ] Live URL pasted into this README + [`demoscript.md`](./demoscript.md)
 
 ### Ops: SigNoz UI without exposing it
 
 ```bash
-ssh -L 8080:127.0.0.1:8080 user@YOUR-VPS
-# then open http://localhost:8080 on your laptop
+ssh -i ~/Downloads/ssh-key-*.key -L 8080:127.0.0.1:8080 ubuntu@<public-ip>
+# open http://localhost:8080 on your laptop
 ```
 
 ---
