@@ -23,7 +23,7 @@ export function parseCheckpoint(raw: unknown): Checkpoint {
   return CheckpointSchema.parse(raw);
 }
 
-/** Plan-defined milestones for Phase 2 (exactly four per happy path). */
+/** Plan-defined milestones for Phase 2 (four per happy path). */
 export const CheckpointMilestones = [
   {
     index: 0,
@@ -51,5 +51,9 @@ export const CheckpointMilestones = [
   },
 ] as const;
 
+/** Auto-emitted immediately before a plan step with `constraints.irreversible: true`. */
+export const PRE_IRREVERSIBLE_LABEL = "pre_irreversible" as const;
+
 export type CheckpointMilestoneLabel =
-  (typeof CheckpointMilestones)[number]["label"];
+  | (typeof CheckpointMilestones)[number]["label"]
+  | typeof PRE_IRREVERSIBLE_LABEL;

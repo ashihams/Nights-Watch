@@ -4,6 +4,7 @@
  * Phase 3: Policy Engine on each step (Query API for prior context).
  * Phase 4: Explanation Layer (SigNoz MCP + LLM) on pause threshold.
  * Phase 5: Recovery Engine (rollback from local store + re-plan + resume).
+ * Phase 7: auto-checkpoint before plan steps tagged irreversible.
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -18,14 +19,21 @@ import {
   recordViolationFlagged,
 } from "../otel/index.js";
 import { generatePlan } from "../planner/index.js";
-import { createCheckpoint } from "../checkpoints/index.js";
+import {
+  createCheckpoint,
+  hasPreIrreversibleCheckpoint,
+  isIrreversiblePlanStep,
+} from "../checkpoints/index.js";
 import { evaluateStep, severityForScore } from "../policy/index.js";
 import { explainViolation } from "../explanation/index.js";
 import {
   executeRecovery,
   markRunRecovered,
 } from "../recovery/index.js";
-import { CheckpointMilestones } from "../types/checkpoint.js";
+import {
+  CheckpointMilestones,
+  PRE_IRREVERSIBLE_LABEL,
+} from "../types/checkpoint.js";
 import type { Plan } from "../types/plan.js";
 import type { StepReport } from "../types/step-report.js";
 import type { PolicyEvaluation } from "../types/policy.js";
@@ -148,6 +156,83 @@ async function emitMilestoneCheckpoint(
   return cp.id;
 }
 
+/**
+ * Snapshot safe state immediately before an irreversible plan step.
+ * Independent of CheckpointMilestones — driven only by constraints.irreversible.
+ * Idempotent for the same (stepId, completedSteps) frontier.
+ */
+async function ensurePreIrreversibleCheckpoint(
+  run: ActiveRun,
+  stepId: string,
+): Promise<string | null> {
+  if (!isIrreversiblePlanStep(run.plan, stepId)) return null;
+  if (hasPreIrreversibleCheckpoint(run.runId, stepId, run.completedSteps)) {
+    return null;
+  }
+
+  const cp = await createCheckpoint({
+    runId: run.runId,
+    index: run.checkpointIds.length,
+    label: PRE_IRREVERSIBLE_LABEL,
+    planStep: stepId,
+    state: {
+      task: run.task,
+      plan: run.plan,
+      planSource: run.planSource,
+      completedSteps: [...run.completedSteps],
+      artifacts: { ...run.artifacts },
+      status: run.status,
+      lastPolicyScore: run.lastPolicyScore,
+      preIrreversibleFor: stepId,
+    },
+    budgetConsumed: run.budgetConsumed,
+    trustContext: {
+      sources: ["planner", "executor", "local-store", "checkpoint-manager"],
+      planSource: run.planSource,
+      reason: "pre_irreversible",
+      irreversibleStepId: stepId,
+    },
+    parentSpanContext: run.parentSpanContext,
+    spanAttributes: {
+      "checkpoint.preIrreversible": true,
+      "checkpoint.irreversibleStepId": stepId,
+    },
+  });
+  run.checkpointIds.push(cp.id);
+  run.parentSpan.addEvent("checkpoint.pre_irreversible", {
+    "checkpoint.id": cp.id,
+    "step.id": stepId,
+  });
+  broadcastCheckpoint({
+    runId: run.runId,
+    checkpointId: cp.id,
+    label: cp.label,
+    index: cp.index,
+    timestamp: cp.timestamp,
+  });
+  console.log(
+    `[supervisor] pre-irreversible checkpoint ${cp.id} before step=${stepId}`,
+  );
+  return cp.id;
+}
+
+/**
+ * Executor call-site: create a pre-irreversible checkpoint before running the step.
+ * Safe no-op when the step is not tagged irreversible.
+ */
+export async function prepareStep(
+  runId: string,
+  stepId: string,
+): Promise<ReturnType<typeof summarizeRun>> {
+  const run = runs.get(runId);
+  if (!run) throw new Error(`Unknown runId: ${runId}`);
+  if (run.status !== "running") {
+    throw new Error(`Run ${runId} is ${run.status}`);
+  }
+  await ensurePreIrreversibleCheckpoint(run, stepId);
+  return publishRun(run);
+}
+
 /** Start a run: generate plan, open parent span, checkpoint plan_generated. */
 export async function startRun(task: string): Promise<ReturnType<typeof summarizeRun>> {
   const runId = `run-${randomUUID().slice(0, 8)}`;
@@ -205,6 +290,10 @@ export async function recordStepReport(
   }
 
   const completedBefore = [...run.completedSteps];
+
+  // Safety net: even if the Executor skipped prepareStep, snapshot before
+  // applying an irreversible step's results to run state.
+  await ensurePreIrreversibleCheckpoint(run, report.stepId);
 
   await withChildSpan(
     run.parentSpanContext,

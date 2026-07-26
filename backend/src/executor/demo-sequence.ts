@@ -8,7 +8,11 @@ import {
   confirmDetails,
   bookFlight,
 } from "../api/mocks.js";
-import { getRun, recordStepReport } from "../supervisor/index.js";
+import {
+  getRun,
+  prepareStep,
+  recordStepReport,
+} from "../supervisor/index.js";
 
 export type DemoSequenceOptions = {
   injectDrift: boolean;
@@ -139,7 +143,13 @@ export async function runDemoSequence(
   }
   await sleep(paceMs);
 
-  // 4) book
+  // 4) book — pre-irreversible checkpoint (constraints.irreversible on plan step)
+  state = await prepareStep(runId, "book");
+  log(
+    `pre-irreversible ready; checkpoints=${state.checkpointIds.length} last=${state.checkpointIds[state.checkpointIds.length - 1]}`,
+  );
+  await sleep(paceMs);
+
   const bookRes = bookFlight({
     flightId: selected.id,
     passengerName: "Demo Traveler",

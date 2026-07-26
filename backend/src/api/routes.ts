@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   startRun,
   recordStepReport,
+  prepareStep,
   getRun,
   summarizeRun,
   listRuns,
@@ -106,6 +107,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     });
     return reply.code(202).send(run);
   });
+
+  /**
+   * Call immediately before an irreversible Executor step (e.g. book).
+   * Creates a pre_irreversible checkpoint when the plan step is tagged
+   * constraints.irreversible; no-op otherwise.
+   */
+  app.post<{ Params: { runId: string } }>(
+    "/runs/:runId/prepare-step",
+    async (req, reply) => {
+      const body = z.object({ stepId: z.string().min(1) }).parse(req.body ?? {});
+      try {
+        const run = await prepareStep(req.params.runId, body.stepId);
+        return { ok: true, run };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const code = message.includes("Unknown runId") ? 404 : 400;
+        return reply.code(code).send({ error: message });
+      }
+    },
+  );
 
   /** n8n / Executor step-completion callback. */
   app.post("/webhooks/n8n/step", async (req, reply) => {
