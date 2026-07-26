@@ -2,26 +2,28 @@
 
 Timed walkthrough for judges. **Target: ~4:30.** Rehearse twice with a stopwatch before presenting.
 
+**Live control room (always-on):** _TBD — same URL as README “Live URL” after VPS verify._  
+Always-on deploy (CX32, SigNoz internal-only, checklist): see [README — Live deployment](./README.md#live-deployment-always-on-judge-link).
+
 **Tabs to pre-open**
 
 | Tab | URL | Purpose |
 |---|---|---|
-| Control room | http://localhost:5173/dashboard | Live Policy Score, approval, feed |
-| SigNoz Traces | http://localhost:8080 (Traces) | Correlated `run.execute` waterfall |
-| (Optional) Landing | http://localhost:5173 | 10-second pitch slide |
+| Control room | Live URL `/dashboard` (or http://localhost:5173/dashboard) | Live Policy Score, approval, feed |
+| SigNoz Traces | SSH tunnel → http://localhost:8080 (not public on VPS) | Correlated `run.execute` waterfall |
+| (Optional) Landing | Live URL `/` (or http://localhost:5173) | 10-second pitch slide |
 
 **Pre-flight (before you start speaking)**
 
 ```bash
-# SigNoz up (Foundry) — casting.yaml at repo root
+# Always-on VPS (preferred for judges): stack already up — just open Live URL.
+# Local rehearsal:
 foundryctl cast -f casting.yaml   # skip if already healthy
-
-# App
 docker compose up --build -d
-# or: backend npm run dev + dashboard npm run dev
+# VPS overlay (loopback binds): docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d --build
 ```
 
-Confirm: `http://localhost:3001/health` → ok · dashboard loads · SigNoz UI loads.
+Confirm: health ok · dashboard loads · SigNoz via SSH tunnel if you need the waterfall live (else use backup video).
 
 ---
 
@@ -74,7 +76,7 @@ CLI auto-rejects medium pause so the story still completes.
 
 **Copy** `run.id` from the dashboard (e.g. `run-a1b2c3d4`).
 
-**In SigNoz → Traces**
+**In SigNoz → Traces** (local: `:8080`; VPS: `ssh -L 8080:127.0.0.1:8080 user@vps` — SigNoz is never on the judge URL)
 
 1. Filter: `service.name = nights-watch` and attribute `run.id = <id>`
 2. Open **`run.execute`** (waterfall / children, not root-only)
@@ -144,5 +146,6 @@ Stop. Invite one question. Backup answers:
 - [ ] Inject-drift reliably hits score 40 and approval panel  
 - [ ] Reject path completes booking  
 - [ ] SigNoz shows `pre_irreversible` + `human.decision` for that `run.id`  
-- [ ] Backup video recorded  
+- [ ] Backup video recorded (required if judges cannot SSH to SigNoz)  
+- [ ] Always-on Live URL verified on **mobile data** (README checklist)  
 - [ ] `docker compose` + Foundry stack healthy before entering the room  

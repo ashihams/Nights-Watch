@@ -20,7 +20,7 @@ Companion docs: [`PROJECT_OVERVIEW.md`](./PROJECT_OVERVIEW.md) · [`CURSOR_GUIDE
 | 5 | Recovery Engine (rollback → re-plan → resume) | Done |
 | 6 | Live React dashboard (Art Deco control room) | Done |
 | 7 | Human approval + pre-irreversible checkpoints | Done |
-| 8 | Demo prep (README, casting, demo script, live link) | In progress |
+| 8 | Demo prep (README, casting, demo script, always-on live link) | Docs ready · live URL pending |
 
 ---
 
@@ -132,6 +132,8 @@ dashboard/                         React + Vite + Tailwind control room
 n8n-workflows/                     travel-booking Executor export
 infra/signoz/                      WSL helpers (port expose, verify scripts)
 docker-compose.yml                 Backend + dashboard (SigNoz separate via Foundry)
+docker-compose.vps.yml             Loopback-only port bind for always-on VPS
+scripts/verify-vps-deploy.sh       Post-deploy checks on the VPS
 ```
 
 ---
@@ -193,11 +195,109 @@ On the dashboard: **Start run (inject drift)** → **Reject & recover** when the
 
 ## Demo path (judges)
 
-1. `foundryctl cast -f casting.yaml` (or use an already-running SigNoz matching the casting).
-2. `docker compose up --build` (or local `npm run dev` for backend + dashboard).
-3. Open the control room → **Start run (inject drift)** → **Reject & recover**.
-4. Show SigNoz trace for the same `run.id` (score spike, explanation, pre-irreversible CP before book, recovery).
-5. Optional: `npm run happy-path:drift` for an unattended CLI path (auto-rejects medium pause).
+1. Open the **live control room** (URL below) — or locally: `foundryctl cast -f casting.yaml` then `docker compose up --build`.
+2. **Start run (inject drift)** → **Reject & recover**.
+3. Show SigNoz trace for the same `run.id` (score spike, explanation, pre-irreversible CP before book, recovery). On the VPS, SigNoz is **not** public — use the recorded demo video or an SSH tunnel (see Live deployment).
+4. Optional: `npm run happy-path:drift` for an unattended CLI path (auto-rejects medium pause).
+
+Timed walkthrough: [`demoscript.md`](./demoscript.md).
+
+---
+
+## Live deployment (always-on judge link)
+
+Judges need a URL that stays up when your laptop is off. **Do not** use a laptop Cloudflare/ngrok quick tunnel as the submission link.
+
+**Live URL:** _TBD — paste the stable HTTPS URL here after the verification checklist passes._
+
+### Architecture on the VPS
+
+```mermaid
+flowchart LR
+  Judges[Judges browser] -->|HTTPS public| Nginx[Dashboard nginx]
+  Nginx -->|same Docker network| API[Backend]
+  API -->|OTLP Query MCP internal only| SigNoz[Foundry SigNoz localhost]
+  Ops[Operator] -->|SSH local forward| SigNoz
+```
+
+Same-origin nginx already proxies `/api` and `/ws` — **no** CORS or `VITE_API_*` changes.
+
+| Surface | Public? | How |
+|---|---|---|
+| Control room (`:5173` → nginx) | **Yes** | Caddy/TLS or named Cloudflare Tunnel **on the VPS** → `127.0.0.1:5173` only |
+| Backend `:3001` | No | Loopback; reached via nginx `/api` and `/ws` |
+| SigNoz UI `:8080`, MCP `:8000`, OTLP `:4317`/`:4318` | **No** | Loopback / host-gateway only. Firewall deny. Ops: `ssh -L 8080:127.0.0.1:8080 user@vps` |
+
+Graceful degradation is intentional: if SigNoz is down, the app still runs (`signoz.mcp.degraded` / query degraded). Trace proof for judges lives in the **recorded demo video**.
+
+### Sizing
+
+| Tier | Spec | Use |
+|---|---|---|
+| **CX32 (recommended)** | 2 vCPU / **8 GB** | Default for unattended judging (ClickHouse + SigNoz + MCP + app) |
+| CX22 | 2 vCPU / 4 GB | Minimum workable — OOM risk under load; avoid for the submission window |
+
+Concrete default: **Hetzner Cloud CX32** (or any Linux VM with ≥8 GB RAM).
+
+### Provision steps
+
+1. Create the VM (Ubuntu 22.04/24.04), SSH in, install Docker Engine + Compose plugin + `foundryctl` (`curl -fsSL https://signoz.io/foundry.sh | bash`).
+2. Clone this repo; `cp .env.example .env` (LLM keys optional).
+3. Cast SigNoz (internal):
+   ```bash
+   foundryctl cast -f casting.yaml
+   ```
+   Harden: **ufw allow 22,80,443** (or only 22 if using Cloudflare Tunnel only) and **deny** `8080`, `8000`, `4317`, `4318`, `3001` from the public internet. Prefer rebinding Foundry published ports to `127.0.0.1` in the generated compose under `pours/` if they appear as `0.0.0.0`.
+4. Start the app with the VPS overlay (loopback binds):
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d --build
+   ```
+5. Expose **dashboard only**:
+   - **Cloudflare Tunnel (named, on the VPS):** point the public hostname at `http://127.0.0.1:5173` — nothing else.
+   - **Or Caddy** on `:443` reverse-proxying to `127.0.0.1:5173` with automatic TLS.
+6. Paste the HTTPS URL into **Live URL** above and into [`demoscript.md`](./demoscript.md).
+
+### Backend → SigNoz on Linux (`host.docker.internal`)
+
+[`docker-compose.yml`](./docker-compose.yml) already sets:
+
+- `OTEL_*` / `SIGNOZ_*` → `http://host.docker.internal:{4318,8080,8000}`
+- `extra_hosts: host.docker.internal:host-gateway`
+
+That works on Docker Engine for Linux; **verify once** on a fresh VPS (behavior can differ from WSL/Docker Desktop):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.vps.yml exec backend \
+  node -e "fetch('http://host.docker.internal:8080/api/v1/health').then(r=>console.log(r.status)).catch(e=>{console.error(e);process.exit(1)})"
+```
+
+Expect `200`. If it fails, confirm SigNoz is listening on the host loopback and that `host-gateway` resolves inside the container (`getent hosts host.docker.internal`).
+
+### Verification checklist (before calling Phase 8 done)
+
+Automated smoke (on the VPS):
+
+```bash
+chmod +x scripts/verify-vps-deploy.sh
+./scripts/verify-vps-deploy.sh https://YOUR-PUBLIC-HOST
+# optional: PUBLIC_HOST=YOUR.VPS.IP ./scripts/verify-vps-deploy.sh https://YOUR-PUBLIC-HOST
+```
+
+Manual gates (required):
+
+- [ ] Public URL works from **outside** home/VPS network (phone on **mobile data**)
+- [ ] In-container SigNoz health via `host.docker.internal` succeeds (command above)
+- [ ] Full interactive loop over the public link: **Start run (inject drift)** → pause → **Reject & recover** → booking completes
+- [ ] Stop SigNoz once on the VPS; control room still loads and degrades cleanly (no hard error for judges)
+- [ ] Confirm SigNoz ports are **not** reachable from the public internet
+- [ ] Live URL pasted into this README + demoscript
+
+### Ops: SigNoz UI without exposing it
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@YOUR-VPS
+# then open http://localhost:8080 on your laptop
+```
 
 ---
 

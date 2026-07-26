@@ -1,0 +1,12 @@
+# Always-on VPS overlay: bind app ports to loopback only.
+# Public traffic should reach the dashboard via Caddy/TLS or a named
+# Cloudflare Tunnel on the VPS — never expose SigNoz (8080/4318/8000).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d --build
+services:
+  backend:
+    ports:
+      - "127.0.0.1:3001:3001"
+  dashboard:
+    ports:
+      - "127.0.0.1:5173:80"

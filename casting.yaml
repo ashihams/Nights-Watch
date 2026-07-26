@@ -1,6 +1,11 @@
 # Nights Watch — SigNoz Foundry casting (judge-reproducible).
 # Deploy: foundryctl cast -f casting.yaml
 # Forge only (generates pours/ + casting.yaml.lock): foundryctl forge -f casting.yaml
+#
+# Security (always-on VPS): do NOT publish SigNoz UI / Query API / MCP / OTLP
+# on the public internet. Keep 8080 / 8000 / 4317 / 4318 on loopback (firewall
+# deny + optional compose bind 127.0.0.1). Judges use the app dashboard only;
+# operators use: ssh -L 8080:127.0.0.1:8080 user@vps
 apiVersion: v1alpha1
 kind: Installation
 metadata:
