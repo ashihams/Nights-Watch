@@ -28,8 +28,8 @@ const STEPS = [
   },
 ] as const;
 
-/** Replace with the final YouTube demo URL when recorded. */
-const DEMO_VIDEO_URL = "https://www.youtube.com/watch?v=PLACEHOLDER";
+/** Demo walkthrough on YouTube. */
+const DEMO_VIDEO_URL = "https://youtu.be/9nVryaNu1Ng";
 
 export function LandingPage({
   onOpenDashboard,
