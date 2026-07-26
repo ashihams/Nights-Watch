@@ -1,3 +1,4 @@
+import { apiUrl } from "./endpoints";
 import type {
   CheckpointRow,
   ExplanationEvent,
@@ -7,7 +8,7 @@ import type {
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(apiUrl(path), {
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
     ...init,
   });

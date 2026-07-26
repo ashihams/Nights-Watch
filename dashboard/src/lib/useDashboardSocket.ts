@@ -1,4 +1,5 @@
 import { startTransition, useEffect, useRef } from "react";
+import { wsUrl } from "./endpoints";
 import type {
   CheckpointEvent,
   ExplanationEvent,
@@ -17,8 +18,7 @@ export function useDashboardSocket(handlers: Handlers): void {
   handlersRef.current = handlers;
 
   useEffect(() => {
-    const proto = window.location.protocol === "https:" ? "wss" : "ws";
-    const url = `${proto}://${window.location.host}/ws`;
+    const url = wsUrl();
     let socket: WebSocket | null = null;
     let closed = false;
     let retryMs = 1000;

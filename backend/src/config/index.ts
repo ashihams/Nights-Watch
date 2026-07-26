@@ -31,9 +31,21 @@ export const POLICY_WEIGHT_MINOR_PARAM = Number(
   process.env.POLICY_WEIGHT_MINOR_PARAM ?? 10,
 ); // small same-tool deviation — low
 
+/** Comma-separated browser origins allowed for CORS (Vercel). `*` = reflect any. Empty = CORS off (same-origin Docker). */
+function parseCorsOrigins(): string[] | true | false {
+  const raw = process.env.CORS_ORIGINS?.trim();
+  if (!raw) return false;
+  if (raw === "*") return true;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 3001),
   nodeEnv: process.env.NODE_ENV ?? "development",
+  corsOrigins: parseCorsOrigins(),
   otel: {
     endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "http://localhost:4318",
     headers: process.env.OTEL_EXPORTER_OTLP_HEADERS ?? "",

@@ -1,0 +1,32 @@
+# Nights Watch backend on Render (free web service).
+# Dashboard: deploy separately on Vercel with VITE_API_URL=https://<this-service>.onrender.com
+# SigNoz is not hosted here — run locally / record demo video (graceful degradation).
+services:
+  - type: web
+    name: nights-watch-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CHECKPOINT_DB_PATH
+        value: ./data/checkpoints.sqlite
+      # Set in Render dashboard after first Vercel deploy, e.g.:
+      # https://nights-watch.vercel.app,http://localhost:5173
+      - key: CORS_ORIGINS
+        sync: false
+      # Optional LLM keys (deterministic fallbacks work without them)
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      # Point at a reachable SigNoz only if you have one; otherwise leave unset (degraded).
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      - key: SIGNOZ_QUERY_API_URL
+        sync: false
+      - key: SIGNOZ_MCP_ENDPOINT
+        sync: false

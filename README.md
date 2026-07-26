@@ -20,7 +20,7 @@ Companion docs: [`PROJECT_OVERVIEW.md`](./PROJECT_OVERVIEW.md) · [`CURSOR_GUIDE
 | 5 | Recovery Engine (rollback → re-plan → resume) | Done |
 | 6 | Live React dashboard (Art Deco control room) | Done |
 | 7 | Human approval + pre-irreversible checkpoints | Done |
-| 8 | Demo prep (README, casting, demo script, always-on live link) | Docs ready · live URL pending |
+| 8 | Demo prep (README, casting, demo script, free live link) | In progress · Vercel + Render |
 
 ---
 
@@ -133,6 +133,8 @@ n8n-workflows/                     travel-booking Executor export
 infra/signoz/                      WSL helpers (port expose, verify scripts)
 docker-compose.yml                 Backend + dashboard (SigNoz separate via Foundry)
 docker-compose.vps.yml             Loopback-only port bind for always-on VPS
+render.yaml                        Render free backend blueprint
+dashboard/vercel.json              Vercel SPA rewrites
 scripts/verify-vps-deploy.sh       Post-deploy checks on the VPS
 ```
 
@@ -204,15 +206,61 @@ Timed walkthrough: [`demoscript.md`](./demoscript.md).
 
 ---
 
-## Live deployment (always-on judge link)
+## Live deployment
 
-Judges need a URL that stays up when your laptop is off. **Do not** use a laptop Cloudflare/ngrok quick tunnel as the submission link.
+**Live URL (control room):** _TBD — paste the Vercel URL after deploy._
 
-**Free default:** [Oracle Cloud Always Free](https://www.oracle.com/cloud/free/) Ampere A1 + **Caddy** + **[nip.io](https://nip.io)** hostname (no domain purchase, no Cloudflare account).
+### Quick free path: Vercel (UI) + Render (API)
 
-**Live URL:** _TBD — paste `https://<public-ip-with-dashes>.nip.io` here after the checklist passes._
+Best for a submission link within about an hour. **SigNoz is not on Render** — use graceful degradation + a recorded local demo for traces.
 
-### Architecture
+```mermaid
+flowchart LR
+  Judges[Judges] --> Vercel[Vercel dashboard]
+  Vercel -->|HTTPS REST| Render[Render Fastify]
+  Vercel -->|WSS| Render
+  SigNozLocal[SigNoz local video only]
+```
+
+#### 1. Backend on Render
+
+1. Push this branch to GitHub.
+2. [Render](https://render.com) → **New → Blueprint** (use [`render.yaml`](./render.yaml)) **or** **Web Service** → connect repo → Docker, root `backend/` (`Dockerfile`).
+3. Free plan. Health check: `/health`.
+4. Env vars:
+   - `CORS_ORIGINS` = your Vercel URL (add after step 2), e.g. `https://nights-watch.vercel.app` (comma-separate `http://localhost:5173` if needed)
+   - Optional: `ANTHROPIC_API_KEY` (deterministic demo works without it)
+   - Leave `SIGNOZ_*` / `OTEL_*` unset for public deploy (degraded)
+5. Deploy → copy service URL, e.g. `https://nights-watch-backend.onrender.com`.
+6. Confirm: `https://<render-host>/health` returns OK (first hit may take ~30s on free cold start).
+
+#### 2. Dashboard on Vercel
+
+1. [Vercel](https://vercel.com) → **Add New Project** → import repo.
+2. **Root Directory:** `dashboard`
+3. Framework: Vite. Build: `npm run build`. Output: `dist`.
+4. Env:
+   - `VITE_API_URL` = `https://<your-render-host>` (no trailing slash, no `/api`)
+5. Deploy. SPA rewrite is in [`dashboard/vercel.json`](./dashboard/vercel.json).
+6. Set Render `CORS_ORIGINS` to the Vercel URL and **redeploy** the backend if you created the UI second.
+
+#### 3. Smoke test
+
+- Open the Vercel URL → control room → **Start run (inject drift)** → **Reject & recover**.
+- Cold start: wait for Render to wake if the first click is slow.
+- Paste the Vercel URL into **Live URL** above and the submission form.
+
+Local Docker / same-origin still works with **no** `VITE_API_URL` (nginx `/api` + `/ws` proxy).
+
+---
+
+### Optional: full stack on a VPS (app + SigNoz)
+
+Use this only if you want Foundry SigNoz on the same always-on host (Oracle Always Free / Hetzner). More setup than Vercel + Render.
+
+**Free VM option:** [Oracle Cloud Always Free](https://www.oracle.com/cloud/free/) Ampere **2 OCPU / 12 GB** + Caddy + [nip.io](https://nip.io).
+
+### VPS architecture
 
 ```mermaid
 flowchart LR
@@ -223,7 +271,7 @@ flowchart LR
   Ops[Operator] -->|SSH local forward| SigNoz
 ```
 
-Same-origin nginx already proxies `/api` and `/ws` — **no** CORS or `VITE_API_*` changes.
+Same-origin nginx proxies `/api` and `/ws` on the VPS path.
 
 | Surface | Public? | How |
 |---|---|---|

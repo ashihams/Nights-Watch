@@ -1,6 +1,7 @@
 /**
  * Nights Watch Backend — Phase 4+5: Explanation, Recovery, Policy, Checkpoints.
  */
+import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { config } from "./config/index.js";
 import { initOtel, shutdownOtel } from "./otel/index.js";
@@ -11,6 +12,12 @@ async function main(): Promise<void> {
   initOtel();
 
   const app = Fastify({ logger: true });
+  if (config.corsOrigins !== false) {
+    await app.register(cors, {
+      origin: config.corsOrigins,
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    });
+  }
   await registerRoutes(app);
 
   const shutdown = async () => {
