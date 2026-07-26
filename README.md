@@ -16,8 +16,8 @@ Companion docs: [`PROJECT_OVERVIEW.md`](./PROJECT_OVERVIEW.md) · [`CURSOR_GUIDE
 | 3 | Policy Engine (rules + Query API + score) | Done |
 | 4 | Explanation Layer (MCP + LLM + `policy.explanation`) | Done |
 | 5 | Recovery Engine (rollback → re-plan → resume) | Done |
-| 6 | Live React dashboard | Next |
-| 7 | Nice-to-haves (human approval → irreversible CP) | Later |
+| 6 | Live React dashboard | Done |
+| 7 | Nice-to-haves (human approval → irreversible CP) | In progress |
 | 8 | Demo prep | Later |
 
 ## Architecture (short)

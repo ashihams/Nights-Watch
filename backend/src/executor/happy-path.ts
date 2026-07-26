@@ -70,6 +70,16 @@ async function main(): Promise<void> {
       );
       lastStatus = run.status;
     }
+
+    // Unattended CLI: simulate operator reject on medium-severity pause.
+    if (run.status === "awaiting_approval") {
+      console.log(
+        `[happy-path] auto-rejecting awaiting_approval (CLI stand-in for dashboard Reject)`,
+      );
+      await postJson(`/runs/${started.runId}/decision`, { decision: "reject" });
+      continue;
+    }
+
     if (
       run.status === "completed" ||
       run.status === "failed" ||

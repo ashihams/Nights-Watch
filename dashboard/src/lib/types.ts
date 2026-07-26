@@ -1,10 +1,13 @@
 export type RunStatus =
   | "running"
   | "paused"
+  | "awaiting_approval"
   | "completed"
   | "failed"
   | "hard_stopped"
   | "recovering";
+
+export type HumanDecision = "approve" | "reject";
 
 export type PolicyEvalPoint = {
   stepId: string;
@@ -40,6 +43,9 @@ export type RunSummary = {
     mcpOk: boolean;
     source: string;
   };
+  awaitingApproval?: boolean;
+  pendingApproval?: { stepId: string; score: number } | null;
+  lastHumanDecision?: HumanDecision;
   policyEvaluations: PolicyEvalPoint[];
   startedAt: string;
 };

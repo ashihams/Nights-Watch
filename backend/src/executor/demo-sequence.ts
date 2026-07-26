@@ -8,14 +8,65 @@ import {
   confirmDetails,
   bookFlight,
 } from "../api/mocks.js";
-import { getRun, recordStepReport } from "../supervisor/index.js";
+import {
+  getRun,
+  prepareStep,
+  recordStepReport,
+  summarizeRun,
+} from "../supervisor/index.js";
 
 export type DemoSequenceOptions = {
   injectDrift: boolean;
   /** Delay between steps for human-visible dashboard pacing (0 = none). */
   paceMs?: number;
+  /** Max wait for human approve/reject (default 10 min). */
+  approvalTimeoutMs?: number;
   log?: (msg: string) => void;
 };
+
+type RunState = ReturnType<typeof summarizeRun>;
+
+/** True while the run is blocked on a human decision or in-flight recovery. */
+function isApprovalGate(status: string): boolean {
+  return status === "awaiting_approval" || status === "recovering";
+}
+
+/**
+ * Block while medium-severity pause waits for dashboard/CLI decision,
+ * and through any reject→rollback recovery that follows.
+ */
+async function waitWhileAwaitingApproval(
+  runId: string,
+  timeoutMs: number,
+  log: (msg: string) => void,
+): Promise<RunState> {
+  const started = Date.now();
+  let state = summarizeRun(getRun(runId)!);
+  if (!isApprovalGate(state.status)) return state;
+
+  if (state.status === "awaiting_approval") {
+    log(
+      `awaiting human approval on step=${state.pendingApproval?.stepId} score=${state.pendingApproval?.score} (approve/reject via dashboard or POST /runs/${runId}/decision)`,
+    );
+  }
+
+  while (isApprovalGate(state.status)) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error(
+        `Timed out waiting for human approval on ${runId} after ${timeoutMs}ms`,
+      );
+    }
+    await sleep(250);
+    const run = getRun(runId);
+    if (!run) throw new Error(`Run ${runId} disappeared while awaiting approval`);
+    state = summarizeRun(run);
+  }
+
+  log(
+    `approval resolved decision=${state.lastHumanDecision ?? "?"} status=${state.status} recovered=${state.recovered}`,
+  );
+  return state;
+}
 
 function pickInBudget(
   options: Array<{ id: string; priceUsd: number; airline: string }>,
@@ -92,6 +143,14 @@ export async function runDemoSequence(
     costUsd: selectRes.selected.priceUsd,
   });
 
+  if (state.status === "awaiting_approval") {
+    state = await waitWhileAwaitingApproval(
+      runId,
+      options.approvalTimeoutMs ?? 10 * 60_000,
+      log,
+    );
+  }
+
   if (injectDrift && state.status === "running" && state.recovered) {
     log(
       `post-recovery resume; completedSteps=${state.completedSteps.join(",")}`,
@@ -100,8 +159,8 @@ export async function runDemoSequence(
     const searchArtifact = state.artifacts?.search as
       | { options?: Array<{ id: string; priceUsd: number; airline: string }> }
       | undefined;
-    const options = searchArtifact?.options ?? search.options;
-    selected = pickInBudget(options, state.plan.maxBudget);
+    const optionsList = searchArtifact?.options ?? search.options;
+    selected = pickInBudget(optionsList, state.plan.maxBudget);
     log(`re-selecting in-budget ${selected.id} at $${selected.priceUsd}`);
     selectRes = selectFlight(selected.id);
     state = await recordStepReport({
@@ -139,7 +198,13 @@ export async function runDemoSequence(
   }
   await sleep(paceMs);
 
-  // 4) book
+  // 4) book — pre-irreversible checkpoint (constraints.irreversible on plan step)
+  state = await prepareStep(runId, "book");
+  log(
+    `pre-irreversible ready; checkpoints=${state.checkpointIds.length} last=${state.checkpointIds[state.checkpointIds.length - 1]}`,
+  );
+  await sleep(paceMs);
+
   const bookRes = bookFlight({
     flightId: selected.id,
     passengerName: "Demo Traveler",

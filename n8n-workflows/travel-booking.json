@@ -108,6 +108,21 @@
     {
       "parameters": {
         "method": "POST",
+        "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/runs/{{$('Webhook Start').item.json.runId}}/prepare-step",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"stepId\": \"book\"\n}",
+        "options": {}
+      },
+      "id": "prepare-book",
+      "name": "Prepare Irreversible Book",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
         "url": "={{$env.NIGHTS_WATCH_BACKEND || \"http://host.docker.internal:3001\"}}/mocks/book",
         "sendBody": true,
         "specifyBody": "json",
@@ -118,7 +133,7 @@
       "name": "Book Flight",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1540, 0]
+      "position": [1760, 0]
     },
     {
       "parameters": {
@@ -133,7 +148,7 @@
       "name": "Report Book",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1760, 0]
+      "position": [1980, 0]
     }
   ],
   "connections": {
@@ -156,6 +171,9 @@
       "main": [[{ "node": "Report Confirm", "type": "main", "index": 0 }]]
     },
     "Report Confirm": {
+      "main": [[{ "node": "Prepare Irreversible Book", "type": "main", "index": 0 }]]
+    },
+    "Prepare Irreversible Book": {
       "main": [[{ "node": "Book Flight", "type": "main", "index": 0 }]]
     },
     "Book Flight": {

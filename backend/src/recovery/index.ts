@@ -29,13 +29,14 @@ import {
 export type Severity = "low" | "medium" | "high" | "hard_stop";
 
 /**
- * Single severity→action policy (CURSOR_GUIDE Phase 5).
- * Human-approval UI not ready → medium auto-recovers like a soft rollback+replan.
+ * Single severity→action policy (CURSOR_GUIDE Phase 5 / Phase 7).
+ * medium → await human approve/reject on the dashboard (not auto-recover).
  */
 export type RecoveryAction =
   | "continue"
   | "replan"
   | "rollback_replan"
+  | "await_human"
   | "hard_stop";
 
 export function decideRecoveryAction(severity: Severity): RecoveryAction {
@@ -43,8 +44,7 @@ export function decideRecoveryAction(severity: Severity): RecoveryAction {
     case "low":
       return "continue";
     case "medium":
-      // No human-approval UI yet → auto re-plan after soft rollback to last safe CP
-      return "rollback_replan";
+      return "await_human";
     case "high":
       return "rollback_replan";
     case "hard_stop":
@@ -155,10 +155,28 @@ export async function executeRecovery(input: {
   parentSpanContext: SpanContext;
   /** When true, re-plan prompt includes "avoid prior budget breach". */
   avoidDriftHint?: boolean;
+  /** Force an action (e.g. human reject → rollback_replan). */
+  actionOverride?: RecoveryAction;
 }): Promise<RecoveryResult> {
   const started = Date.now();
-  const action = decideRecoveryAction(input.severity);
+  const action = input.actionOverride ?? decideRecoveryAction(input.severity);
   recordRecoveryAttempt(action, { "run.id": input.runId });
+
+  if (action === "await_human") {
+    return {
+      action,
+      success: false,
+      restoredCheckpointId: null,
+      plan: input.snapshot.plan,
+      planSource: input.snapshot.planSource,
+      completedSteps: input.snapshot.completedSteps,
+      artifacts: input.snapshot.artifacts,
+      budgetConsumed: input.snapshot.budgetConsumed,
+      checkpointIds: input.snapshot.checkpointIds,
+      detail: "awaiting human approval — no auto-recovery",
+      durationMs: Date.now() - started,
+    };
+  }
 
   if (action === "continue") {
     return {

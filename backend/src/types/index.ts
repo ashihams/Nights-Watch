@@ -6,6 +6,7 @@ export type { Checkpoint, CheckpointMilestoneLabel } from "./checkpoint.js";
 export {
   CheckpointSchema,
   CheckpointMilestones,
+  PRE_IRREVERSIBLE_LABEL,
   parseCheckpoint,
 } from "./checkpoint.js";
 export type { PolicyEvaluation, RuleResult } from "./policy.js";
