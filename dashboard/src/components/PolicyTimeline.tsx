@@ -4,10 +4,14 @@ export function PolicyTimeline({
   evaluations,
   checkpoints,
   thresholds,
+  focusedStepId,
+  onStepClick,
 }: {
   evaluations: PolicyEvalPoint[];
   checkpoints: CheckpointRow[];
   thresholds: Thresholds;
+  focusedStepId?: string | null;
+  onStepClick?: (stepId: string) => void;
 }) {
   const width = 640;
   const height = 220;
@@ -100,20 +104,28 @@ export function PolicyTimeline({
         <path d={line} fill="none" stroke="#D4AF37" strokeWidth={2} />
         {points.map((p, i) => {
           const spike = p.score >= thresholds.pause;
+          const focused = focusedStepId === p.stepId;
+          const clickable = p.stepId !== "—" && !!onStepClick;
           return (
-            <g key={`${p.stepId}-${i}`}>
+            <g
+              key={`${p.stepId}-${i}`}
+              className={clickable ? "cursor-pointer" : undefined}
+              onClick={clickable ? () => onStepClick?.(p.stepId) : undefined}
+            >
               <circle
                 cx={xAt(i)}
                 cy={yAt(p.score)}
-                r={spike ? 7 : 4}
+                r={focused ? 9 : spike ? 7 : 4}
                 fill={spike ? "#F2E8C4" : "#D4AF37"}
+                stroke={focused ? "#D4AF37" : "none"}
+                strokeWidth={focused ? 2 : 0}
                 className={spike ? "nw-spike" : undefined}
               />
               <text
                 x={xAt(i)}
                 y={height - 10}
                 textAnchor="middle"
-                className="fill-nw-muted"
+                className={focused ? "fill-nw-gold" : "fill-nw-muted"}
                 style={{ fontSize: 10, letterSpacing: "0.08em" }}
               >
                 {p.stepId.toUpperCase()}

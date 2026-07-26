@@ -4,7 +4,7 @@
  * Phase 3: Policy Engine on each step (Query API for prior context).
  * Phase 4: Explanation Layer (SigNoz MCP + LLM) on pause threshold.
  * Phase 5: Recovery Engine (rollback from local store + re-plan + resume).
- * Phase 7: auto-checkpoint before plan steps tagged irreversible.
+ * Phase 7: auto-checkpoint before irreversible steps; human approval on medium.
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -29,6 +29,7 @@ import { explainViolation } from "../explanation/index.js";
 import {
   executeRecovery,
   markRunRecovered,
+  type Severity,
 } from "../recovery/index.js";
 import {
   CheckpointMilestones,
@@ -41,16 +42,26 @@ import type { Explanation } from "../explanation/index.js";
 import { config } from "../config/index.js";
 import {
   broadcastCheckpoint,
+  broadcastExplanation,
   broadcastRunUpdate,
 } from "../api/ws-hub.js";
 
 export type RunStatus =
   | "running"
   | "paused"
+  | "awaiting_approval"
   | "completed"
   | "failed"
   | "hard_stopped"
   | "recovering";
+
+export type HumanDecision = "approve" | "reject";
+
+export interface PendingApproval {
+  stepId: string;
+  score: number;
+  evaluation: PolicyEvaluation;
+}
 
 export interface ActiveRun {
   runId: string;
@@ -70,6 +81,14 @@ export interface ActiveRun {
   lastRecoveryDurationMs?: number;
   lastRestoredCheckpointId?: string;
   lastExplanation?: Explanation;
+  pendingApproval?: PendingApproval;
+  lastHumanDecision?: HumanDecision;
+  /**
+   * After an operator approves a medium pause, further medium pauses on this
+   * run are skipped (e.g. book of an already-approved over-budget selection).
+   * High / hard_stop still fire. Cleared on reject→recovery.
+   */
+  mediumApprovalGranted?: boolean;
   parentSpan: Span;
   parentSpanContext: SpanContext;
   startedAt: string;
@@ -102,6 +121,15 @@ export function summarizeRun(run: ActiveRun) {
     lastRecoveryDurationMs: run.lastRecoveryDurationMs,
     lastRestoredCheckpointId: run.lastRestoredCheckpointId,
     lastExplanation: run.lastExplanation,
+    awaitingApproval: run.status === "awaiting_approval",
+    pendingApproval: run.pendingApproval
+      ? {
+          stepId: run.pendingApproval.stepId,
+          score: run.pendingApproval.score,
+        }
+      : null,
+    lastHumanDecision: run.lastHumanDecision,
+    mediumApprovalGranted: !!run.mediumApprovalGranted,
     artifacts: run.artifacts,
     policyEvaluations: run.policyEvaluations.map((e) => ({
       stepId: e.stepId,
@@ -118,6 +146,25 @@ function publishRun(run: ActiveRun): ReturnType<typeof summarizeRun> {
   const summary = summarizeRun(run);
   broadcastRunUpdate(summary as unknown as Record<string, unknown>);
   return summary;
+}
+
+/** Live explanation-feed line (same WS channel as Phase 4/6 violation explanations). */
+function pushFeedEvent(
+  run: ActiveRun,
+  stepId: string,
+  score: number,
+  text: string,
+  opts?: { mcpInvoked?: boolean; mcpOk?: boolean },
+): void {
+  broadcastExplanation({
+    runId: run.runId,
+    stepId,
+    score,
+    text,
+    mcpInvoked: opts?.mcpInvoked ?? false,
+    mcpOk: opts?.mcpOk ?? true,
+    timestamp: new Date().toISOString(),
+  });
 }
 
 async function emitMilestoneCheckpoint(
@@ -359,6 +406,12 @@ export async function recordStepReport(
   const severity = severityForScore(evaluation.score);
 
   if (severity === "hard_stop") {
+    pushFeedEvent(
+      run,
+      report.stepId,
+      evaluation.score,
+      `Hard stop on step "${report.stepId}" — policy score ${evaluation.score} breached the ceiling. Run halted.`,
+    );
     run.status = "hard_stopped";
     run.parentSpan.setStatus({
       code: SpanStatusCode.ERROR,
@@ -376,90 +429,90 @@ export async function recordStepReport(
   }
 
   if (severity === "medium" || severity === "high") {
-    // Phase 4: explain before recovery (MCP + LLM)
-    try {
-      run.lastExplanation = await explainViolation({
-        runId: run.runId,
-        plan: run.plan,
-        evaluation,
-        report,
-        parentSpanContext: run.parentSpanContext,
-      });
-    } catch (err) {
-      console.warn("[supervisor] explanation failed:", err);
-    }
-
-    run.status = "recovering";
-    publishRun(run);
-    run.parentSpan.addEvent("run.recovery_started", {
-      "policy.score": evaluation.score,
-      severity,
-      step: report.stepId,
-    });
-    console.log(
-      `[supervisor] recovering run=${run.runId} score=${evaluation.score} severity=${severity}`,
-    );
-
-    const recovery = await executeRecovery({
-      runId: run.runId,
-      task: run.task,
-      severity,
-      evaluation,
-      snapshot: {
-        task: run.task,
-        plan: run.plan,
-        planSource: run.planSource,
-        completedSteps: run.completedSteps,
-        artifacts: run.artifacts,
-        budgetConsumed: run.budgetConsumed,
-        checkpointIds: run.checkpointIds,
-        status: run.status,
-      },
-      parentSpanContext: run.parentSpanContext,
-      avoidDriftHint: true,
-    });
-
-    run.recoveryCount += 1;
-    run.lastRecoveryDetail = recovery.detail;
-    run.lastRecoveryDurationMs = recovery.durationMs;
-    run.lastRestoredCheckpointId = recovery.restoredCheckpointId ?? undefined;
-
-    if (!recovery.success) {
-      run.status = "paused";
-      run.parentSpan.addEvent("run.paused", {
+    // Operator already approved an earlier medium pause → do not re-prompt
+    // (keeps approve→book of the same over-budget choice from looping).
+    if (severity === "medium" && run.mediumApprovalGranted) {
+      pushFeedEvent(
+        run,
+        report.stepId,
+        evaluation.score,
+        `Step "${report.stepId}" still scores ${evaluation.score}, but continues under prior human approval (no second pause).`,
+      );
+      run.parentSpan.addEvent("run.medium_bypassed", {
         "policy.score": evaluation.score,
-        severity,
-        reason: recovery.detail,
+        step: report.stepId,
+        reason: "human_approved_earlier",
       });
-      console.log(`[supervisor] recovery FAILED — paused: ${recovery.detail}`);
-      return publishRun(run);
-    }
+      console.log(
+        `[supervisor] medium bypassed (prior approve) run=${run.runId} step=${report.stepId} score=${evaluation.score}`,
+      );
+    } else {
+      // Phase 4: explain before pause / recovery (MCP + LLM) — also WS-broadcasts
+      try {
+        run.lastExplanation = await explainViolation({
+          runId: run.runId,
+          plan: run.plan,
+          evaluation,
+          report,
+          parentSpanContext: run.parentSpanContext,
+        });
+      } catch (err) {
+        console.warn("[supervisor] explanation failed:", err);
+        pushFeedEvent(
+          run,
+          report.stepId,
+          evaluation.score,
+          `Policy score ${evaluation.score} on step "${report.stepId}" (explanation layer failed).`,
+        );
+      }
 
-    run.plan = recovery.plan;
-    run.planSource = recovery.planSource;
-    run.completedSteps = recovery.completedSteps;
-    run.artifacts = recovery.artifacts;
-    run.budgetConsumed = recovery.budgetConsumed;
-    run.checkpointIds = recovery.checkpointIds;
-    run.recovered = true;
-    run.status = "running";
-    run.lastRecoveryDetail = recovery.detail;
-    // Keep lastExplanation for API/WS consumers; harness reads it on the pause step.
-    run.parentSpan.addEvent("run.resumed", {
-      "recovery.action": recovery.action,
-      "checkpoint.id": recovery.restoredCheckpointId ?? "",
-      "completedSteps": recovery.completedSteps.join(","),
-      "durationMs": recovery.durationMs,
-    });
-    console.log(
-      `[supervisor] RESUMED run=${run.runId} via ${recovery.action} restored=${recovery.restoredCheckpointId} steps=[${recovery.completedSteps.join(",")}]`,
+      // Phase 7: medium → pause for human approve/reject
+      if (severity === "medium") {
+        pushFeedEvent(
+          run,
+          "approval",
+          evaluation.score,
+          `Paused for human approval on step "${report.stepId}" (score ${evaluation.score}). Reject to roll back, or approve to continue.`,
+        );
+        run.pendingApproval = {
+          stepId: report.stepId,
+          score: evaluation.score,
+          evaluation,
+        };
+        run.status = "awaiting_approval";
+        run.parentSpan.addEvent("run.awaiting_approval", {
+          "policy.score": evaluation.score,
+          severity,
+          step: report.stepId,
+        });
+        console.log(
+          `[supervisor] AWAITING APPROVAL run=${run.runId} score=${evaluation.score} step=${report.stepId}`,
+        );
+        return publishRun(run);
+      }
+
+      // high → automatic rollback + re-plan
+      return applyRecovery(run, evaluation, "high");
+    }
+  } else {
+    // low — narrate every in-policy step so the feed tracks the timeline (Phase 6 feel)
+    pushFeedEvent(
+      run,
+      report.stepId,
+      evaluation.score,
+      `Step "${report.stepId}" completed in policy (score ${evaluation.score}, tool ${report.tool}).`,
     );
-    return publishRun(run);
   }
 
   const expected = [...run.plan.steps].sort((a, b) => a.order - b.order);
   const allDone = expected.every((s) => run.completedSteps.includes(s.id));
   if (report.status === "error") {
+    pushFeedEvent(
+      run,
+      report.stepId,
+      evaluation.score,
+      `Step "${report.stepId}" failed: ${report.errorMessage ?? "executor error"}.`,
+    );
     run.status = "failed";
     run.parentSpan.setStatus({
       code: SpanStatusCode.ERROR,
@@ -471,6 +524,14 @@ export async function recordStepReport(
     if (run.recovered || run.recoveryCount > 0) {
       markRunRecovered(run.runId);
     }
+    pushFeedEvent(
+      run,
+      "complete",
+      run.lastPolicyScore,
+      run.recovered
+        ? `Run completed after recovery (${run.recoveryCount} attempt(s)). Original goal finished in scope.`
+        : `Run completed cleanly. All plan steps finished in policy.`,
+    );
     run.parentSpan.setStatus({ code: SpanStatusCode.OK });
     run.parentSpan.addEvent("run.completed", {
       steps: run.completedSteps.join(","),
@@ -485,4 +546,147 @@ export async function recordStepReport(
   }
 
   return publishRun(run);
+}
+
+async function applyRecovery(
+  run: ActiveRun,
+  evaluation: PolicyEvaluation,
+  severity: Severity,
+  actionOverride?: "rollback_replan",
+): Promise<ReturnType<typeof summarizeRun>> {
+  run.status = "recovering";
+  publishRun(run);
+  run.parentSpan.addEvent("run.recovery_started", {
+    "policy.score": evaluation.score,
+    severity,
+    step: evaluation.stepId,
+    ...(actionOverride ? { "recovery.actionOverride": actionOverride } : {}),
+  });
+  console.log(
+    `[supervisor] recovering run=${run.runId} score=${evaluation.score} severity=${severity}`,
+  );
+
+  const recovery = await executeRecovery({
+    runId: run.runId,
+    task: run.task,
+    severity,
+    evaluation,
+    snapshot: {
+      task: run.task,
+      plan: run.plan,
+      planSource: run.planSource,
+      completedSteps: run.completedSteps,
+      artifacts: run.artifacts,
+      budgetConsumed: run.budgetConsumed,
+      checkpointIds: run.checkpointIds,
+      status: run.status,
+    },
+    parentSpanContext: run.parentSpanContext,
+    avoidDriftHint: true,
+    actionOverride,
+  });
+
+  run.recoveryCount += 1;
+  run.lastRecoveryDetail = recovery.detail;
+  run.lastRecoveryDurationMs = recovery.durationMs;
+  run.lastRestoredCheckpointId = recovery.restoredCheckpointId ?? undefined;
+
+  if (!recovery.success) {
+    pushFeedEvent(
+      run,
+      "recovery",
+      evaluation.score,
+      `Recovery failed: ${recovery.detail}. Run paused.`,
+    );
+    run.status = "paused";
+    run.parentSpan.addEvent("run.paused", {
+      "policy.score": evaluation.score,
+      severity,
+      reason: recovery.detail,
+    });
+    console.log(`[supervisor] recovery FAILED — paused: ${recovery.detail}`);
+    return publishRun(run);
+  }
+
+  run.plan = recovery.plan;
+  run.planSource = recovery.planSource;
+  run.completedSteps = recovery.completedSteps;
+  run.artifacts = recovery.artifacts;
+  run.budgetConsumed = recovery.budgetConsumed;
+  run.checkpointIds = recovery.checkpointIds;
+  run.recovered = true;
+  run.status = "running";
+  pushFeedEvent(
+    run,
+    "recovery",
+    evaluation.score,
+    `Recovered via ${recovery.action}; restored=${recovery.restoredCheckpointId ?? "n/a"}. Resuming from steps [${recovery.completedSteps.join(", ") || "none"}].`,
+  );
+  run.parentSpan.addEvent("run.resumed", {
+    "recovery.action": recovery.action,
+    "checkpoint.id": recovery.restoredCheckpointId ?? "",
+    completedSteps: recovery.completedSteps.join(","),
+    durationMs: recovery.durationMs,
+  });
+  console.log(
+    `[supervisor] RESUMED run=${run.runId} via ${recovery.action} restored=${recovery.restoredCheckpointId} steps=[${recovery.completedSteps.join(",")}]`,
+  );
+  return publishRun(run);
+}
+
+/**
+ * Human approve/reject for medium-severity pauses (Phase 7).
+ * approve → continue with current state; reject → rollback + re-plan.
+ */
+export async function resolveHumanDecision(
+  runId: string,
+  decision: HumanDecision,
+): Promise<ReturnType<typeof summarizeRun>> {
+  const run = runs.get(runId);
+  if (!run) throw new Error(`Unknown runId: ${runId}`);
+  if (run.status !== "awaiting_approval" || !run.pendingApproval) {
+    throw new Error(
+      `Run ${runId} is not awaiting approval (status=${run.status})`,
+    );
+  }
+
+  const pending = run.pendingApproval;
+  run.lastHumanDecision = decision;
+  run.parentSpan.addEvent("human.decision", {
+    decision,
+    "run.id": run.runId,
+    "step.id": pending.stepId,
+    "policy.score": pending.score,
+  });
+  console.log(
+    `[supervisor] human decision=${decision} run=${run.runId} step=${pending.stepId}`,
+  );
+
+  if (decision === "approve") {
+    run.pendingApproval = undefined;
+    run.mediumApprovalGranted = true;
+    run.status = "running";
+    run.lastRecoveryDetail = `human approved step ${pending.stepId} (score ${pending.score}) — continuing; further medium pauses bypassed`;
+    pushFeedEvent(
+      run,
+      "approval",
+      pending.score,
+      `Operator approved step "${pending.stepId}" (score ${pending.score}) — continuing; further medium pauses bypassed for this run.`,
+    );
+    run.parentSpan.addEvent("run.resumed", {
+      "recovery.action": "human_approve",
+      "step.id": pending.stepId,
+    });
+    return publishRun(run);
+  }
+
+  run.pendingApproval = undefined;
+  run.mediumApprovalGranted = false;
+  pushFeedEvent(
+    run,
+    "approval",
+    pending.score,
+    `Operator rejected step "${pending.stepId}" (score ${pending.score}) — rolling back to last safe checkpoint and re-planning.`,
+  );
+  return applyRecovery(run, pending.evaluation, "medium", "rollback_replan");
 }

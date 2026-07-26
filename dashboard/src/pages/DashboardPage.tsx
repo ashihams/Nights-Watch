@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../components/Button";
 import { DecoCard } from "../components/DecoCard";
 import { PolicyTimeline } from "../components/PolicyTimeline";
@@ -19,6 +19,18 @@ const DEFAULT_THRESHOLDS: Thresholds = {
   hardStop: 90,
 };
 
+/** One card per run+step+text — ignores timestamp so WS + run_update don't triple. */
+function upsertExplanation(
+  prev: ExplanationEvent[],
+  event: ExplanationEvent,
+): ExplanationEvent[] {
+  const key = `${event.runId}|${event.stepId}|${event.text}`;
+  const without = prev.filter(
+    (e) => `${e.runId}|${e.stepId}|${e.text}` !== key,
+  );
+  return [event, ...without];
+}
+
 export function DashboardPage({ onHome }: { onHome: () => void }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [active, setActive] = useState<RunSummary | null>(null);
@@ -30,6 +42,12 @@ export function DashboardPage({ onHome }: { onHome: () => void }) {
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [focusedStepId, setFocusedStepId] = useState<string | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    activeRunIdRef.current = active?.runId ?? null;
+  }, [active?.runId]);
 
   const refreshLists = useCallback(async () => {
     // Do not hydrate the explanation feed here — refresh should start empty;
@@ -57,15 +75,24 @@ export function DashboardPage({ onHome }: { onHome: () => void }) {
 
   const loadExplanationsForRun = useCallback(async (runId: string) => {
     const res = await api.getExplanations();
-    setExplanations(
-      res.explanations.filter((e) => e.runId === runId).reverse(),
-    );
+    const seen = new Set<string>();
+    const deduped: ExplanationEvent[] = [];
+    for (const e of [...res.explanations].reverse()) {
+      if (e.runId !== runId) continue;
+      const key = `${e.stepId}|${e.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(e);
+    }
+    setExplanations(deduped);
   }, []);
 
   const selectRun = useCallback(
     async (runId: string) => {
       const run = await api.getRun(runId);
+      activeRunIdRef.current = run.runId;
       setActive(run);
+      setFocusedStepId(null);
       await Promise.all([loadCheckpoints(runId), loadExplanationsForRun(runId)]);
     },
     [loadCheckpoints, loadExplanationsForRun],
@@ -84,14 +111,14 @@ export function DashboardPage({ onHome }: { onHome: () => void }) {
       void api.getRecoveryMetrics().then(setRecoveryMetrics).catch(() => undefined);
     },
     onExplanation: (event) => {
-      setExplanations((prev) => {
-        // Only show live explanations for the currently watched run.
-        const watching = active?.runId;
-        if (watching && event.runId !== watching) return prev;
-        return [event, ...prev.filter((e) => e.timestamp !== event.timestamp)];
-      });
+      // Phase 6 style: append live WS feed events (step / approval / recovery).
+      const watching = activeRunIdRef.current;
+      if (watching && event.runId !== watching) return;
+      setExplanations((prev) => upsertExplanation(prev, event));
     },
     onCheckpoint: (event: CheckpointEvent) => {
+      const watching = activeRunIdRef.current;
+      if (watching && event.runId !== watching) return;
       setCheckpoints((prev) => {
         if (prev.some((c) => c.id === event.checkpointId)) return prev;
         return [
@@ -115,9 +142,11 @@ export function DashboardPage({ onHome }: { onHome: () => void }) {
     setError(null);
     try {
       const run = await api.startDemo({ injectDrift });
+      activeRunIdRef.current = run.runId;
       setActive(run);
       setCheckpoints([]);
       setExplanations([]);
+      setFocusedStepId(null);
       setRuns((prev) => [run, ...prev.filter((r) => r.runId !== run.runId)]);
       await loadCheckpoints(run.runId);
     } catch (e) {
@@ -127,13 +156,45 @@ export function DashboardPage({ onHome }: { onHome: () => void }) {
     }
   };
 
-  const feedForRun = useMemo(
-    () =>
-      active
-        ? explanations.filter((e) => e.runId === active.runId)
-        : [],
-    [active, explanations],
-  );
+  const decide = async (decision: "approve" | "reject") => {
+    if (!active) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.submitDecision(active.runId, decision);
+      setActive(res.run);
+      setRuns((prev) => {
+        const next = prev.filter((r) => r.runId !== res.run.runId);
+        return [res.run, ...next];
+      });
+      await loadCheckpoints(res.run.runId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const feedForRun = useMemo(() => {
+    if (!active) return [];
+    // Newest first; hard-dedupe by step+text. Never filter-hide other cards —
+    // timeline focus only highlights (filtering made the feed look "stuck").
+    const seen = new Set<string>();
+    const forRun: ExplanationEvent[] = [];
+    for (const e of explanations) {
+      if (e.runId !== active.runId) continue;
+      const key = `${e.stepId}|${e.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      forRun.push(e);
+    }
+    if (!focusedStepId) return forRun;
+    return [...forRun].sort((a, b) => {
+      const af = a.stepId === focusedStepId ? 0 : 1;
+      const bf = b.stepId === focusedStepId ? 0 : 1;
+      return af - bf;
+    });
+  }, [active, explanations, focusedStepId]);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 md:px-6 md:py-12">
@@ -211,11 +272,55 @@ export function DashboardPage({ onHome }: { onHome: () => void }) {
               label="Started"
               value={new Date(active.startedAt).toLocaleString()}
             />
+            {active.lastHumanDecision ? (
+              <Stat
+                label="Human decision"
+                value={active.lastHumanDecision}
+                emphasize
+              />
+            ) : null}
           </dl>
         ) : (
           <p className="text-nw-muted">Start a run to populate the control room.</p>
         )}
       </DecoCard>
+
+      {active?.status === "awaiting_approval" ? (
+        <DecoCard
+          title="Human approval required"
+          className="nw-enter mb-6"
+          accent
+        >
+          <p className="mb-4 text-sm leading-relaxed text-nw-fg/90">
+            Medium-severity pause on step{" "}
+            <span className="font-mono text-nw-gold">
+              {active.pendingApproval?.stepId ?? "?"}
+            </span>{" "}
+            (score {active.pendingApproval?.score ?? active.lastPolicyScore}).
+            For the inject-drift demo, use{" "}
+            <span className="text-nw-gold">Reject &amp; recover</span>. Approve
+            accepts this violation for the rest of the run (no second medium
+            pause on later steps).
+          </p>
+          {active.lastExplanation?.text ? (
+            <p className="mb-4 border border-nw-gold/30 bg-nw-bg/50 p-3 text-sm text-nw-muted">
+              {active.lastExplanation.text}
+            </p>
+          ) : null}
+          <div className="flex flex-wrap gap-3">
+            <Button
+              variant="solid"
+              disabled={busy}
+              onClick={() => void decide("reject")}
+            >
+              Reject &amp; recover
+            </Button>
+            <Button disabled={busy} onClick={() => void decide("approve")}>
+              Approve &amp; continue
+            </Button>
+          </div>
+        </DecoCard>
+      ) : null}
 
       <div className="mb-6 grid gap-6 lg:grid-cols-5">
         <DecoCard title="Policy score timeline" className="nw-enter lg:col-span-3">
@@ -223,39 +328,73 @@ export function DashboardPage({ onHome }: { onHome: () => void }) {
             evaluations={active?.policyEvaluations ?? []}
             checkpoints={checkpoints}
             thresholds={thresholds}
+            focusedStepId={focusedStepId}
+            onStepClick={(stepId) =>
+              setFocusedStepId((cur) => (cur === stepId ? null : stepId))
+            }
           />
+          <p className="mt-2 text-xs text-nw-muted">
+            Click a step on the timeline to focus its explanation (if any).
+          </p>
         </DecoCard>
         <DecoCard title="Explanation feed" className="nw-enter lg:col-span-2">
           <ul className="flex max-h-[280px] flex-col gap-3 overflow-y-auto pr-1">
             {feedForRun.length === 0 ? (
-              <li className="text-sm text-nw-muted">No explanations yet.</li>
+              <li className="text-sm text-nw-muted">
+                No explanations yet. Violations (score ≥ pause) appear here live.
+              </li>
             ) : (
-              feedForRun.map((e) => (
-                <li
-                  key={`${e.runId}-${e.timestamp}-${e.stepId}`}
-                  className={`nw-enter border p-3 text-sm ${
-                    e.mcpOk
-                      ? "border-nw-gold/40 bg-nw-bg/60"
-                      : "border-amber-700/60 bg-amber-950/30"
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center gap-2 text-xs tracking-[0.12em] uppercase">
-                    <span className="text-nw-gold">{e.stepId}</span>
-                    <span className="text-nw-muted">score {e.score}</span>
-                    <span
-                      className={
-                        e.mcpOk ? "text-emerald-400/90" : "text-amber-300"
-                      }
-                    >
-                      MCP {e.mcpOk ? "ok" : "degraded"}
-                    </span>
-                  </div>
-                  <p className="mt-2 leading-relaxed text-nw-fg/90">{e.text}</p>
-                  <p className="mt-1 text-xs text-nw-muted">
-                    {new Date(e.timestamp).toLocaleTimeString()}
-                  </p>
-                </li>
-              ))
+              feedForRun.map((e) => {
+                const focused = focusedStepId === e.stepId;
+                const kind =
+                  e.stepId === "recovery"
+                    ? "recovery"
+                    : e.stepId === "approval"
+                      ? "approval"
+                      : e.stepId === "complete"
+                        ? "complete"
+                        : e.score >= thresholds.pause
+                          ? "violation"
+                          : "ok";
+                return (
+                  <li
+                    key={`${e.runId}-${e.timestamp}-${e.stepId}-${e.text.slice(0, 24)}`}
+                    className={`nw-enter border p-3 text-sm ${
+                      focused
+                        ? "border-nw-gold bg-nw-midnight/80 nw-glow"
+                        : kind === "recovery" || kind === "complete"
+                          ? "border-emerald-700/50 bg-emerald-950/20"
+                          : kind === "approval"
+                            ? "border-nw-gold/50 bg-nw-midnight/40"
+                            : kind === "violation"
+                              ? e.mcpOk
+                                ? "border-nw-gold/40 bg-nw-bg/60"
+                                : "border-amber-700/60 bg-amber-950/30"
+                              : "border-nw-gold/25 bg-nw-bg/40"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center gap-2 text-xs tracking-[0.12em] uppercase">
+                      <span className="text-nw-gold">{e.stepId}</span>
+                      <span className="text-nw-muted">score {e.score}</span>
+                      {kind === "violation" ? (
+                        <span
+                          className={
+                            e.mcpOk ? "text-emerald-400/90" : "text-amber-300"
+                          }
+                        >
+                          MCP {e.mcpOk ? "ok" : "degraded"}
+                        </span>
+                      ) : (
+                        <span className="text-emerald-400/90">{kind}</span>
+                      )}
+                    </div>
+                    <p className="mt-2 leading-relaxed text-nw-fg/90">{e.text}</p>
+                    <p className="mt-1 text-xs text-nw-muted">
+                      {new Date(e.timestamp).toLocaleTimeString()}
+                    </p>
+                  </li>
+                );
+              })
             )}
           </ul>
         </DecoCard>

@@ -60,3 +60,13 @@ export function getThresholds(): Promise<Thresholds> {
 export function getRecoveryMetrics(): Promise<RecoveryMetrics> {
   return request("/metrics/recovery");
 }
+
+export function submitDecision(
+  runId: string,
+  decision: "approve" | "reject",
+): Promise<{ ok: boolean; run: RunSummary }> {
+  return request(`/runs/${runId}/decision`, {
+    method: "POST",
+    body: JSON.stringify({ decision }),
+  });
+}
